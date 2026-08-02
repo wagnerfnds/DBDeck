@@ -110,4 +110,71 @@ final class SQLiteDriverTests: XCTestCase {
         XCTAssertTrue(statements[0].contains("'a;b''c'"))
         XCTAssertTrue(statements[1].contains("SELECT 1"))
     }
+
+    func testDumpImportComFKIndexView() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dbdeck-fk-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let driver = SQLiteDriver(config: ConnectionConfig(engine: .sqlite, sqlitePath: url.path))
+        try await driver.connect()
+        defer { Task { await driver.disconnect() } }
+
+        try await driver.execute("CREATE TABLE pais (id INTEGER PRIMARY KEY, nome TEXT NOT NULL)")
+        try await driver.execute("""
+            CREATE TABLE cidade (
+                id INTEGER PRIMARY KEY,
+                nome TEXT NOT NULL,
+                pais_id INTEGER REFERENCES pais(id) ON DELETE CASCADE
+            )
+        """)
+        try await driver.execute("INSERT INTO pais (id, nome) VALUES (1, 'Brasil')")
+        try await driver.execute("INSERT INTO cidade (id, nome, pais_id) VALUES (1, 'São Paulo', 1)")
+        try await driver.execute("CREATE INDEX idx_cidade_nome ON cidade(nome)")
+        try await driver.execute("CREATE VIEW v_pais AS SELECT nome FROM pais")
+
+        do {
+            _ = try await driver.execute("INSERT INTO cidade (id, nome, pais_id) VALUES (99, 'X', 999)")
+            XCTFail("FK deveria bloquear insert inválido")
+        } catch {
+            // esperado
+        }
+
+        let dump = try await SQLDump.dump(driver: driver)
+        XCTAssertTrue(dump.contains("REFERENCES"))
+        XCTAssertTrue(dump.contains("CREATE INDEX"))
+        XCTAssertTrue(dump.contains("CREATE VIEW"))
+        XCTAssertTrue(dump.contains("'Brasil'"))
+
+        let importURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dbdeck-fk-import-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: importURL) }
+        let importDriver = SQLiteDriver(config: ConnectionConfig(engine: .sqlite, sqlitePath: importURL.path))
+        try await importDriver.connect()
+        defer { Task { await importDriver.disconnect() } }
+
+        let (statements, errors) = try await SQLDump.importSQL(dump, driver: importDriver)
+        XCTAssertTrue(errors.isEmpty, errors.joined(separator: "\n"))
+        XCTAssertGreaterThanOrEqual(statements, 2)
+
+        let count = try await importDriver.countRows(table: "cidade")
+        XCTAssertEqual(count, 1)
+
+        do {
+            _ = try await importDriver.execute("INSERT INTO cidade (id, nome, pais_id) VALUES (99, 'X', 999)")
+            XCTFail("FK deveria estar valendo no banco importado")
+        } catch {
+            // esperado
+        }
+    }
+
+    func testKeychain() throws {
+        let uuid = UUID()
+        defer { KeychainManager.deletePassword(for: uuid) }
+        XCTAssertNil(KeychainManager.password(for: uuid))
+        KeychainManager.setPassword("senha@123", for: uuid)
+        XCTAssertEqual(KeychainManager.password(for: uuid), "senha@123")
+        KeychainManager.deletePassword(for: uuid)
+        XCTAssertNil(KeychainManager.password(for: uuid))
+    }
 }
