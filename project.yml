@@ -1,0 +1,51 @@
+name: DBDeck
+options:
+  bundleIdPrefix: br.dev.dbdeck
+  deploymentTarget:
+    macOS: "14.0"
+packages:
+  PostgresNIO:
+    url: https://github.com/vapor/postgres-nio
+    from: 1.25.0
+  MySQLNIO:
+    url: https://github.com/vapor/mysql-nio
+    from: 1.2.0
+  NIOSSL:
+    url: https://github.com/apple/swift-nio-ssl
+    from: 2.25.0
+targets:
+  DBDeckCore:
+    type: framework
+    platform: macOS
+    sources:
+      - Sources/DBDeckCore
+    dependencies:
+      - package: PostgresNIO
+      - package: MySQLNIO
+      - package: NIOSSL
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+        GENERATE_INFOPLIST_FILE: YES
+  DBDeck:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/DBDeckApp
+    dependencies:
+      - target: DBDeckCore
+    settings:
+      base:
+        PRODUCT_NAME: DBDeck
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+        SWIFT_VERSION: "6.0"
+        ENABLE_HARDENED_RUNTIME: YES
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_CFBundleDisplayName: DBDeck
+        COMBINE_HIDPI_IMAGES: YES
