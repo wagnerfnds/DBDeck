@@ -8,8 +8,7 @@ packages:
     url: https://github.com/vapor/postgres-nio
     from: 1.25.0
   MySQLNIO:
-    url: https://github.com/vapor/mysql-nio
-    from: 1.2.0
+    path: ThirdParty/mysql-nio
   NIOSSL:
     url: https://github.com/apple/swift-nio-ssl
     from: 2.25.0

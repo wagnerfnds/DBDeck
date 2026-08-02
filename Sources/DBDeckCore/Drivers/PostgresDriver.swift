@@ -30,7 +30,7 @@ public final class PostgresDriver: DatabaseDriver, @unchecked Sendable {
             host: config.host,
             port: config.port,
             username: config.username,
-            password: config.password,
+            password: config.password.isEmpty ? nil : config.password,
             database: config.database.isEmpty ? nil : config.database,
             tls: tls
         )
@@ -71,9 +71,10 @@ public final class PostgresDriver: DatabaseDriver, @unchecked Sendable {
             """
         )
         return result.rows.map { row in
-            DatabaseTable(
+            let kind = (row.count > 1 ? row[1].display : "table").lowercased().contains("view") ? "view" : "table"
+            return DatabaseTable(
                 name: row.count > 0 ? row[0].display : "",
-                kind: row.count > 1 ? row[1].display : "table"
+                kind: kind
             )
         }
     }

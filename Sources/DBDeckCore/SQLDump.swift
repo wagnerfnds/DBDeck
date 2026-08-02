@@ -206,7 +206,8 @@ public enum SQLDump {
 
     private static func querySingleValue(driver: any DatabaseDriver, sql: String) async throws -> String? {
         let result = try await driver.query(sql)
-        guard let row = result.rows.first, let value = row.first else { return nil }
+        // SHOW CREATE TABLE retorna (Table, Create Table) — o DDL fica na última coluna.
+        guard let row = result.rows.first, let value = row.last else { return nil }
         return value.display
     }
 

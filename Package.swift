@@ -10,7 +10,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.25.0"),
-        .package(url: "https://github.com/vapor/mysql-nio.git", from: "1.2.0"),
+        .package(path: "ThirdParty/mysql-nio"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.25.0"),
     ],
     targets: [

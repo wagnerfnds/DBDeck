@@ -33,7 +33,7 @@ public final class MySQLDriver: DatabaseDriver, @unchecked Sendable {
                 to: address,
                 username: config.username,
                 database: database,
-                password: config.password,
+                password: config.password.isEmpty ? nil : config.password,
                 tlsConfiguration: tls,
                 on: group.next()
             ).get()
@@ -66,9 +66,10 @@ public final class MySQLDriver: DatabaseDriver, @unchecked Sendable {
     public func tables() async throws -> [DatabaseTable] {
         let result = try await query("SHOW FULL TABLES")
         return result.rows.map { row in
-            DatabaseTable(
+            let kind = (row.count > 1 ? row[1].display : "table").lowercased().contains("view") ? "view" : "table"
+            return DatabaseTable(
                 name: row.first?.display ?? "",
-                kind: row.count > 1 ? row[1].display : "table"
+                kind: kind
             )
         }
     }

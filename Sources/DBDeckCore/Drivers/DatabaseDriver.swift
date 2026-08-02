@@ -25,7 +25,12 @@ public protocol DatabaseDriver: Sendable {
 
 public extension DatabaseDriver {
     func quoteIdentifier(_ name: String) -> String {
-        "\"\(name.replacingOccurrences(of: "\"", with: "\"\""))\""
+        switch engine {
+        case .mysql:
+            return "`\(name.replacingOccurrences(of: "`", with: "``"))`"
+        case .postgres, .sqlite:
+            return "\"\(name.replacingOccurrences(of: "\"", with: "\"\""))\""
+        }
     }
 
     func isSelectStatement(_ sql: String) -> Bool {
