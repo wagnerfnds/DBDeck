@@ -2,6 +2,7 @@ import Foundation
 import MySQLNIO
 import NIOCore
 import NIOPosix
+import NIOSSL
 import os
 
 public final class MySQLDriver: DatabaseDriver, @unchecked Sendable {
@@ -25,12 +26,15 @@ public final class MySQLDriver: DatabaseDriver, @unchecked Sendable {
         do {
             let address = try SocketAddress.makeAddressResolvingHost(config.host, port: config.port)
             let database = config.database.isEmpty ? config.username : config.database
+            let tls: NIOSSL.TLSConfiguration? = config.useTLS
+                ? NIOSSL.TLSConfiguration.makeClientConfiguration()
+                : nil
             let conn = try await MySQLConnection.connect(
                 to: address,
                 username: config.username,
                 database: database,
                 password: config.password,
-                tlsConfiguration: nil,
+                tlsConfiguration: tls,
                 on: group.next()
             ).get()
             self.eventLoopGroup = group

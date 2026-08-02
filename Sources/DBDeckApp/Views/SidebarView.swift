@@ -85,7 +85,7 @@ struct SidebarView: View {
             Text(errorMessage ?? "")
         }
         .onChange(of: state.selectedConnectionID) { _, newValue in
-            guard let id = newValue, let config = state.config(for: id) else { return }
+            guard let id = newValue, state.config(for: id) != nil else { return }
             if state.active[id] == nil {
                 Task {
                     let ok = await state.connect(id)

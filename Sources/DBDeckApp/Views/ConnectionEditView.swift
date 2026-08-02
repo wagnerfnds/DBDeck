@@ -123,11 +123,13 @@ struct ConnectionEditView: View {
 
 enum TestConnection {
     static func run(config: ConnectionConfig) async -> String {
+        var live = config
+        live.password = KeychainManager.password(for: config.id) ?? config.password
         let driver: any DatabaseDriver
-        switch config.engine {
-        case .postgres: driver = PostgresDriver(config: config)
-        case .mysql: driver = MySQLDriver(config: config)
-        case .sqlite: driver = SQLiteDriver(config: config)
+        switch live.engine {
+        case .postgres: driver = PostgresDriver(config: live)
+        case .mysql: driver = MySQLDriver(config: live)
+        case .sqlite: driver = SQLiteDriver(config: live)
         }
         do {
             try await driver.connect()

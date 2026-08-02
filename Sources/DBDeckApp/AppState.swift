@@ -18,6 +18,28 @@ final class AppState {
     var active: [UUID: any DatabaseDriver] = [:]
     var connectionStatus: [UUID: ConnectionStatus] = [:]
 
+    init() {
+        migrateLegacyPasswords()
+    }
+
+    /// Senhas antigas salvas em texto plano no JSON: migra para o Keychain e limpa o arquivo.
+    private func migrateLegacyPasswords() {
+        var changed = false
+        for workspaceIndex in workspaces.indices {
+            for connectionIndex in workspaces[workspaceIndex].connections.indices {
+                let connection = workspaces[workspaceIndex].connections[connectionIndex]
+                if !connection.password.isEmpty {
+                    KeychainManager.setPassword(connection.password, for: connection.id)
+                    workspaces[workspaceIndex].connections[connectionIndex].password = ""
+                    changed = true
+                }
+            }
+        }
+        if changed {
+            persist()
+        }
+    }
+
     // MARK: - Workspaces
 
     func addWorkspace(named name: String) {
@@ -41,7 +63,10 @@ final class AppState {
 
     func addConnection(_ config: ConnectionConfig, to workspaceID: UUID) {
         guard let index = workspaces.firstIndex(where: { $0.id == workspaceID }) else { return }
-        workspaces[index].connections.append(config)
+        KeychainManager.setPassword(config.password, for: config.id)
+        var stored = config
+        stored.password = ""
+        workspaces[index].connections.append(stored)
         persist()
     }
 
@@ -55,12 +80,16 @@ final class AppState {
             active[config.id] = nil
             connectionStatus[config.id] = .disconnected
         }
-        workspaces[workspaceIndex].connections[connectionIndex] = config
+        KeychainManager.setPassword(config.password, for: config.id)
+        var stored = config
+        stored.password = ""
+        workspaces[workspaceIndex].connections[connectionIndex] = stored
         persist()
     }
 
     func deleteConnection(_ config: ConnectionConfig) {
         disconnect(config.id)
+        KeychainManager.deletePassword(for: config.id)
         for index in workspaces.indices {
             workspaces[index].connections.removeAll { $0.id == config.id }
         }
@@ -79,6 +108,13 @@ final class AppState {
             }
         }
         return nil
+    }
+
+    /// Config com a senha hidratada do Keychain (o JSON guarda apenas o campo vazio).
+    func liveConfig(for connectionID: UUID) -> ConnectionConfig? {
+        guard var config = config(for: connectionID) else { return nil }
+        config.password = KeychainManager.password(for: config.id) ?? ""
+        return config
     }
 
     func driver(for config: ConnectionConfig) async -> (any DatabaseDriver)? {
@@ -105,7 +141,7 @@ final class AppState {
     }
 
     func connect(_ connectionID: UUID) async -> Bool {
-        guard let config = config(for: connectionID) else { return false }
+        guard let config = liveConfig(for: connectionID) else { return false }
         return await driver(for: config) != nil
     }
 

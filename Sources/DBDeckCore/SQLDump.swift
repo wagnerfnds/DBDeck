@@ -1,6 +1,8 @@
 import Foundation
 
 public enum SQLDump {
+    // MARK: - Dump
+
     public static func dump(driver: any DatabaseDriver) async throws -> String {
         let tables = try await driver.tables()
         var output: [String] = []
@@ -8,12 +10,43 @@ public enum SQLDump {
         output.append("-- Gerado em \(Date())")
         output.append("")
 
+        // 1. DDL
+        switch driver.engine {
+        case .postgres:
+            for table in tables where table.kind == "table" {
+                let columns = try await driver.columns(table: table.name)
+                guard !columns.isEmpty else { continue }
+                output.append(createTablePostgres(driver: driver, table: table.name, columns: columns))
+                output.append("")
+            }
+            for sequence in try await postgresSequences(driver: driver) {
+                output.append("CREATE SEQUENCE IF NOT EXISTS \(driver.quoteIdentifier(sequence));")
+                output.append("SELECT setval('\(driver.quoteIdentifier(sequence))', last_value, is_called) FROM \(driver.quoteIdentifier(sequence));")
+                output.append("")
+            }
+            for view in tables where view.kind == "view" {
+                output.append(await createViewPostgres(driver: driver, view: view.name))
+                output.append("")
+            }
+        case .mysql:
+            for table in tables {
+                let ddl = try await querySingleValue(driver: driver, sql: "SHOW CREATE \(table.kind == "view" ? "VIEW" : "TABLE") `\(table.name)`")
+                if let ddl {
+                    output.append(ddl.hasSuffix(";") ? ddl : ddl + ";")
+                    output.append("")
+                }
+            }
+        case .sqlite:
+            for entry in try await sqliteSchema(driver: driver) {
+                output.append(entry)
+                output.append("")
+            }
+        }
+
+        // 2. Dados (apenas tabelas)
         for table in tables where table.kind == "table" {
             let columns = try await driver.columns(table: table.name)
             guard !columns.isEmpty else { continue }
-            output.append(createTable(driver: driver, table: table.name, columns: columns))
-            output.append("")
-
             var offset = 0
             let pageSize = 500
             while true {
@@ -25,12 +58,21 @@ public enum SQLDump {
             }
             output.append("")
         }
+
+        // 3. Foreign keys no Postgres (criadas por último para não bloquear os INSERTs)
+        if driver.engine == .postgres {
+            output.append(contentsOf: try await postgresForeignKeys(driver: driver))
+        }
+
         return output.joined(separator: "\n")
     }
+
+    // MARK: - Import
 
     public static func importSQL(_ sql: String, driver: any DatabaseDriver) async throws -> (statements: Int, errors: [String]) {
         var errors: [String] = []
         var count = 0
+        try? await setForeignKeyChecks(false, driver: driver)
         for statement in splitStatements(sql) {
             do {
                 _ = try await driver.execute(statement)
@@ -39,12 +81,24 @@ public enum SQLDump {
                 errors.append("\(statement.prefix(80))…\n  → \(error.localizedDescription)")
             }
         }
+        try? await setForeignKeyChecks(true, driver: driver)
         return (count, errors)
+    }
+
+    private static func setForeignKeyChecks(_ enabled: Bool, driver: any DatabaseDriver) async throws {
+        switch driver.engine {
+        case .sqlite:
+            _ = try await driver.execute(enabled ? "PRAGMA foreign_keys = ON" : "PRAGMA foreign_keys = OFF")
+        case .mysql:
+            _ = try await driver.execute(enabled ? "SET FOREIGN_KEY_CHECKS = 1" : "SET FOREIGN_KEY_CHECKS = 0")
+        case .postgres:
+            break
+        }
     }
 
     // MARK: - Helpers
 
-    private static func createTable(driver: any DatabaseDriver, table: String, columns: [DatabaseColumn]) -> String {
+    private static func createTablePostgres(driver: any DatabaseDriver, table: String, columns: [DatabaseColumn]) -> String {
         var parts: [String] = []
         let pkColumns = columns.filter(\.isPrimaryKey).map(\.name)
         for column in columns {
@@ -62,6 +116,98 @@ public enum SQLDump {
             parts.append("PRIMARY KEY (\(pk))")
         }
         return "CREATE TABLE \(driver.quoteIdentifier(table)) (\n  \(parts.joined(separator: ",\n  "))\n);"
+    }
+
+    private static func createViewPostgres(driver: any DatabaseDriver, view: String) async -> String {
+        let safeName = view.replacingOccurrences(of: "'", with: "''")
+        let definition = try? await querySingleValue(
+            driver: driver,
+            sql: "SELECT pg_get_viewdef('\(safeName)'::regclass, true)"
+        )
+        let body = definition ?? "-- falha ao obter definição"
+        return "CREATE VIEW \(driver.quoteIdentifier(view)) AS \(body);"
+    }
+
+    private static func postgresSequences(driver: any DatabaseDriver) async throws -> [String] {
+        let result = try await driver.query(
+            """
+            SELECT c.relname
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = current_schema() AND c.relkind = 'S'
+            ORDER BY c.relname
+            """
+        )
+        return result.rows.compactMap { row in
+            if case .text(let name) = row.first { return name }
+            return nil
+        }
+    }
+
+    private static func postgresForeignKeys(driver: any DatabaseDriver) async throws -> [String] {
+        let result = try await driver.query(
+            """
+            SELECT
+              tc.table_name,
+              kcu.column_name,
+              ccu.table_name AS foreign_table,
+              ccu.column_name AS foreign_column,
+              rc.delete_rule,
+              rc.update_rule
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name = kcu.constraint_name AND tc.constraint_schema = kcu.constraint_schema
+            JOIN information_schema.referential_constraints rc
+              ON rc.constraint_name = tc.constraint_name AND rc.constraint_schema = tc.constraint_schema
+            JOIN information_schema.constraint_column_usage ccu
+              ON ccu.constraint_name = rc.unique_constraint_name AND ccu.constraint_schema = rc.constraint_schema
+            WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = current_schema()
+            ORDER BY tc.table_name
+            """
+        )
+        var statements: [String] = []
+        for row in result.rows {
+            guard row.count >= 5 else { continue }
+            let table = driver.quoteIdentifier(row[0].display)
+            let column = driver.quoteIdentifier(row[1].display)
+            let foreignTable = driver.quoteIdentifier(row[2].display)
+            let foreignColumn = driver.quoteIdentifier(row[3].display)
+            var statement = "ALTER TABLE \(table) ADD FOREIGN KEY (\(column)) REFERENCES \(foreignTable) (\(foreignColumn))"
+            let deleteRule = row[4].display
+            let updateRule = row.count > 5 ? row[5].display : ""
+            if deleteRule != "NO ACTION" {
+                statement += " ON DELETE \(deleteRule)"
+            }
+            if updateRule != "NO ACTION" {
+                statement += " ON UPDATE \(updateRule)"
+            }
+            statement += ";"
+            statements.append(statement)
+        }
+        return statements
+    }
+
+    private static func sqliteSchema(driver: any DatabaseDriver) async throws -> [String] {
+        let result = try await driver.query(
+            """
+            SELECT sql, type
+            FROM sqlite_master
+            WHERE type IN ('table','index','view','trigger')
+              AND name NOT LIKE 'sqlite_%'
+            ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 WHEN 'view' THEN 2 ELSE 3 END, name
+            """
+        )
+        return result.rows.compactMap { row in
+            let sql = row.first?.display ?? ""
+            guard !sql.isEmpty else { return nil }
+            return sql.hasSuffix(";") ? sql : sql + ";"
+        }
+    }
+
+    private static func querySingleValue(driver: any DatabaseDriver, sql: String) async throws -> String? {
+        let result = try await driver.query(sql)
+        guard let row = result.rows.first, let value = row.first else { return nil }
+        return value.display
     }
 
     private static func appendInserts(
@@ -100,6 +246,8 @@ public enum SQLDump {
             output.append("INSERT INTO \(driver.quoteIdentifier(table)) (\(colList)) VALUES\n\(chunk);")
         }
     }
+
+    // MARK: - Splitter
 
     /// Divide SQL em statements respeitando aspas simples, duplas, crases e comentários.
     public static func splitStatements(_ sql: String) -> [String] {

@@ -22,7 +22,7 @@ public final class PostgresDriver: DatabaseDriver, @unchecked Sendable {
     public func connect() async throws {
         let tls: PostgresClient.Configuration.TLS
         if config.useTLS {
-            tls = .prefer(try NIOSSL.TLSConfiguration.makeClientConfiguration())
+            tls = .prefer(NIOSSL.TLSConfiguration.makeClientConfiguration())
         } else {
             tls = .disable
         }
