@@ -3,108 +3,43 @@ import DBDeckCore
 
 struct SQLConsoleView: View {
     let driver: any DatabaseDriver
+    let tab: EditorTab
+    let session: ConnectionSession
+    /// Só a aba visível/selecionada registra atalhos de teclado. As abas ocultas
+    /// continuam montadas (ZStack com opacity 0) e um ⌘⏎ registrado nelas roubaria
+    /// o atalho da aba visível — executando o SQL da aba errada.
+    var isActive: Bool = true
 
-    @State private var sql = ""
     @State private var result: QueryResult?
     @State private var message: String?
     @State private var errorMessage: String?
     @State private var isRunning = false
     @State private var isShowingEditor = true
+    @State private var selectedCell: EditCoord?
+    @State private var selectedRow: Int?
+    /// Fração do editor no INÍCIO do arrasto do divisor (o delta aplica sobre ela).
+    @State private var dragStartFraction: Double?
 
-    private let cellWidth: CGFloat = 180
+    private var showLibrary: Bool { tab.showLibrary }
+
+    private var sql: Binding<String> { Bindable(tab).sqlText }
 
     var body: some View {
-        VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Consulta SQL")
-                        .font(.caption.bold())
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button {
-                        withAnimation { isShowingEditor.toggle() }
-                    } label: {
-                        Image(systemName: isShowingEditor ? "chevron.down" : "chevron.up")
+        HStack(spacing: 0) {
+            console
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if showLibrary {
+                Divider()
+                QueryLibraryPanel(
+                    session: session,
+                    currentSQL: sql.wrappedValue,
+                    onPick: { picked, title in
+                        sql.wrappedValue = picked
+                        if let title { tab.title = title }
                     }
-                    .buttonStyle(.borderless)
-                }
-                if isShowingEditor {
-                    TextEditor(text: $sql)
-                        .font(.system(.body, design: .monospaced))
-                        .scrollContentBackground(.hidden)
-                        .background(Color.gray.opacity(0.08))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                        .overlay {
-                            if sql.isEmpty {
-                                Text("SELECT * FROM minha_tabela LIMIT 100;")
-                                    .font(.system(.body, design: .monospaced))
-                                    .foregroundStyle(.tertiary)
-                                    .padding(.top, 8)
-                                    .padding(.leading, 6)
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                                    .allowsHitTesting(false)
-                            }
-                        }
-                }
-                HStack {
-                    Button {
-                        Task { await run() }
-                    } label: {
-                        if isRunning {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Label("Executar", systemImage: "play.fill")
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(isRunning || sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .keyboardShortcut(.return, modifiers: .command)
-
-                    if let message {
-                        Text(message)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if result != nil {
-                        Button {
-                            exportCSV()
-                        } label: {
-                            Label("Exportar CSV", systemImage: "square.and.arrow.up")
-                        }
-                    }
-                }
-            }
-            .padding(12)
-
-            Divider()
-
-            if let errorMessage {
-                HStack {
-                    Text(errorMessage)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.red)
-                        .textSelection(.enabled)
-                    Spacer()
-                }
-                .padding(12)
-            } else if let result {
-                if result.columns.isEmpty {
-                    Spacer()
-                    Text("Comando executado sem resultado de linhas.")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                } else {
-                    readOnlyGrid(result)
-                }
-            } else {
-                Spacer()
-                ContentUnavailableView(
-                    "Console SQL",
-                    systemImage: "terminal",
-                    description: Text("Escreva uma consulta e clique em Executar (⌘⏎).")
                 )
-                Spacer()
+                .frame(width: 280)
+                .transition(.move(edge: .trailing))
             }
         }
         .alert("Erro", isPresented: .init(
@@ -117,81 +52,449 @@ struct SQLConsoleView: View {
         }
     }
 
+    private var console: some View {
+        // Editor em cima, resultados embaixo, divisor arrastável no meio — a fração
+        // vive na aba (EditorTab.editorFraction), então sobrevive à troca de abas.
+        GeometryReader { geo in
+            VStack(spacing: 0) {
+                editorPane
+                    .frame(height: isShowingEditor
+                        ? max(120, geo.size.height * tab.editorFraction)
+                        : nil)
+
+                if isShowingEditor {
+                    splitHandle(totalHeight: geo.size.height)
+                }
+
+                resultsPane
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+
+    private var editorPane: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Consulta SQL")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    withAnimation { isShowingEditor.toggle() }
+                } label: {
+                    Image(systemName: isShowingEditor ? "chevron.down" : "chevron.up")
+                }
+                .buttonStyle(.borderless)
+            }
+            if isShowingEditor {
+                SQLEditorView(text: sql)
+                    .background(Color.gray.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(alignment: .topLeading) {
+                        if sql.wrappedValue.isEmpty {
+                            Text("SELECT * FROM minha_tabela LIMIT 100;")
+                                .font(.system(size: 13, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                                .padding(.leading, 9)
+                                .padding(.top, 8)
+                                .allowsHitTesting(false)
+                        }
+                    }
+            }
+            HStack {
+                Button {
+                    Task { await run() }
+                } label: {
+                    if isRunning {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Label("Executar", systemImage: "play.fill")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isRunning || sql.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                // nil desregistra o atalho quando a aba está oculta/no split.
+                .keyboardShortcut(isActive ? KeyboardShortcut(.return, modifiers: .command) : nil)
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { tab.showLibrary.toggle() }
+                } label: {
+                    Label("Biblioteca", systemImage: "books.vertical")
+                }
+                .foregroundStyle(showLibrary ? Color.accentColor : .primary)
+                .help("Consultas salvas e histórico")
+
+                if let message {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let result, !result.columns.isEmpty {
+                    Menu {
+                        ForEach(ExportFormat.allCases) { format in
+                            Button(format.label) { exportResult(result, format: format) }
+                        }
+                    } label: {
+                        Label("Exportar", systemImage: "square.and.arrow.up")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Exportar o resultado (CSV, JSON ou SQL)")
+                }
+            }
+        }
+        .padding(12)
+    }
+
+    /// Divisor arrastável entre editor e resultados (estilo Sequel Ace).
+    private func splitHandle(totalHeight: CGFloat) -> some View {
+        ZStack {
+            Divider()
+            // Área de pega generosa; o traço visual continua fino.
+            Color.clear
+                .frame(height: 9)
+                .contentShape(Rectangle())
+        }
+        .onHover { inside in
+            if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 1)
+                .onChanged { gesture in
+                    let base = dragStartFraction ?? tab.editorFraction
+                    dragStartFraction = base
+                    guard totalHeight > 0 else { return }
+                    let proposed = base + gesture.translation.height / totalHeight
+                    tab.editorFraction = min(0.85, max(0.15, proposed))
+                }
+                .onEnded { _ in dragStartFraction = nil }
+        )
+    }
+
+    @ViewBuilder
+    private var resultsPane: some View {
+        if let errorMessage {
+            VStack {
+                HStack {
+                    Text(errorMessage)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                    Spacer()
+                }
+                .padding(12)
+                Spacer()
+            }
+        } else if let result {
+            if result.columns.isEmpty {
+                VStack {
+                    Spacer()
+                    Text("Comando executado sem resultado de linhas.")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+            } else {
+                readOnlyGrid(result)
+            }
+        } else {
+            VStack {
+                Spacer()
+                ContentUnavailableView(
+                    "Console SQL",
+                    systemImage: "terminal",
+                    description: Text("Escreva uma consulta e clique em Executar (⌘⏎).")
+                )
+                Spacer()
+            }
+        }
+    }
+
     private func run() async {
         isRunning = true
         errorMessage = nil
         result = nil
         message = nil
+        selectedCell = nil
+        selectedRow = nil
         defer { isRunning = false }
+        let start = Date()
         do {
-            let statement = sql.trimmingCharacters(in: .whitespacesAndNewlines)
+            let statement = sql.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            session.recordQuery(statement)
             if driver.isSelectStatement(statement) {
-                result = try await driver.query(statement)
+                let output = try await driver.query(statement)
+                result = output
+                message = "\(output.rows.count) linha\(output.rows.count == 1 ? "" : "s") · \(elapsed(since: start))"
             } else {
                 let affected = try await driver.execute(statement)
-                message = "Comando executado. \(affected) linhas afetadas."
+                message = "OK · \(affected) linha\(affected == 1 ? "" : "s") afetada\(affected == 1 ? "" : "s") · \(elapsed(since: start))"
             }
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
+    private func elapsed(since start: Date) -> String {
+        let ms = Date().timeIntervalSince(start) * 1000
+        return ms < 1000 ? String(format: "%.0f ms", ms) : String(format: "%.2f s", ms / 1000)
+    }
+
+    /// Grid nativo read-only: só as linhas visíveis existem, então um SELECT de
+    /// dezenas de milhares de linhas renderiza instantâneo — e de quebra ganha
+    /// seleção de célula, ⌘C e cópia de linha.
     private func readOnlyGrid(_ result: QueryResult) -> some View {
-        ScrollView([.horizontal, .vertical]) {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 0) {
-                    ForEach(result.columns, id: \.self) { column in
-                        Text(column)
-                            .font(.caption.bold())
-                            .frame(width: cellWidth, height: 28, alignment: .leading)
-                            .padding(.horizontal, 4)
-                            .background(Color.gray.opacity(0.1))
-                    }
-                }
-                Divider()
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(result.rows.indices, id: \.self) { rowIndex in
-                        readonlyRow(result, rowIndex)
-                    }
-                }
-            }
-        }
+        DataGridView(
+            columns: result.columns.map { GridColumnSpec(name: $0) },
+            rows: result.rows,
+            rowNumberStart: 1,
+            editable: false,
+            selectedCell: $selectedCell,
+            selectedRow: $selectedRow,
+            onSort: nil,
+            onSetValue: nil
+        )
         .background(Color(nsColor: .textBackgroundColor))
     }
 
-    private func readonlyRow(_ result: QueryResult, _ rowIndex: Int) -> some View {
-        HStack(spacing: 0) {
-            ForEach(result.rows[rowIndex].indices, id: \.self) { columnIndex in
-                readonlyCell(result, rowIndex, columnIndex)
-            }
-        }
-        .background(rowIndex % 2 == 1 ? Color.gray.opacity(0.04) : Color.clear)
-    }
-
-    private func readonlyCell(_ result: QueryResult, _ rowIndex: Int, _ columnIndex: Int) -> some View {
-        let value = result.rows[rowIndex][columnIndex]
-        return Text(value.display)
-            .font(.system(.body, design: .monospaced))
-            .foregroundStyle(value == .null ? Color.secondary.opacity(0.5) : .primary)
-            .frame(width: cellWidth, height: 24, alignment: .leading)
-            .padding(.horizontal, 4)
-            .contentShape(Rectangle())
-            .textSelection(.enabled)
-    }
-
-    private func exportCSV() {
+    private func exportResult(_ result: QueryResult, format: ExportFormat) {
         #if os(macOS)
-        guard let result else { return }
-        let csv = CSVExporter.export(result: result, fileName: "consulta")
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "consulta.csv"
-        panel.allowedContentTypes = [.commaSeparatedText]
+        panel.nameFieldStringValue = "consulta.\(format.fileExtension)"
+        panel.allowedContentTypes = [.init(filenameExtension: format.fileExtension) ?? .plainText]
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        // O console guarda os valores ÍNTEGROS de propósito (sem preview) — a
+        // exportação sai fiel, inclusive no SQL.
+        let text = ResultExporter.export(
+            format: format,
+            columns: result.columns,
+            rows: result.rows,
+            tableName: "consulta",
+            engine: driver.engine
+        )
         do {
-            try csv.write(to: url, atomically: true, encoding: .utf8)
+            try text.write(to: url, atomically: true, encoding: .utf8)
+            message = "\(format.label) salvo · \(result.rows.count) linhas"
         } catch {
             errorMessage = error.localizedDescription
         }
         #endif
+    }
+}
+
+// MARK: - Biblioteca (consultas salvas + histórico)
+
+private struct QueryLibraryPanel: View {
+    @Environment(AppState.self) private var state
+    let session: ConnectionSession
+    let currentSQL: String
+    /// (sql, título) — título presente quando veio de uma consulta salva.
+    let onPick: (String, String?) -> Void
+
+    enum Mode: String, CaseIterable, Identifiable {
+        case saved = "Salvas"
+        case history = "Histórico"
+        var id: String { rawValue }
+    }
+
+    @State private var mode: Mode = .saved
+    @State private var search = ""
+    @State private var showingSavePrompt = false
+    @State private var saveTitle = ""
+    /// SQL aguardando título no prompt (da consulta atual ou de um item do histórico).
+    @State private var pendingSaveSQL = ""
+
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack(spacing: 8) {
+                Picker("", selection: $mode) {
+                    ForEach(Mode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                HStack(spacing: 5) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    TextField("Buscar", text: $search)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12))
+                    if !search.isEmpty {
+                        Button { search = "" } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 7)
+                .padding(.vertical, 5)
+                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
+            }
+            .padding(10)
+
+            Divider()
+
+            switch mode {
+            case .saved: savedList
+            case .history: historyList
+            }
+
+            Divider()
+
+            Button {
+                pendingSaveSQL = currentSQL
+                saveTitle = ""
+                showingSavePrompt = true
+            } label: {
+                Label("Salvar consulta atual", systemImage: "plus.circle")
+                    .font(.system(size: 12))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderless)
+            .padding(.vertical, 8)
+            .disabled(currentSQL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .background(.bar)
+        .alert("Salvar consulta", isPresented: $showingSavePrompt) {
+            TextField("Título", text: $saveTitle)
+            Button("Salvar") {
+                state.addSavedQuery(title: saveTitle, sql: pendingSaveSQL)
+                mode = .saved
+            }
+            Button("Cancelar", role: .cancel) {}
+        } message: {
+            Text("Dê um título para encontrar depois.")
+        }
+    }
+
+    // MARK: Salvas
+
+    private var filteredSaved: [SavedQuery] {
+        let query = search.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !query.isEmpty else { return state.savedQueries }
+        return state.savedQueries.filter {
+            $0.title.lowercased().contains(query) || $0.sql.lowercased().contains(query)
+        }
+    }
+
+    @ViewBuilder
+    private var savedList: some View {
+        if filteredSaved.isEmpty {
+            emptyState(
+                search.isEmpty ? "Nenhuma consulta salva" : "Nada encontrado",
+                icon: "bookmark",
+                detail: search.isEmpty ? "Salve a consulta atual no botão abaixo." : nil
+            )
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(filteredSaved) { query in
+                        Button {
+                            onPick(query.sql, query.title)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(query.title)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .lineLimit(1)
+                                Text(flatten(query.sql))
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button("Usar no editor") { onPick(query.sql, query.title) }
+                            Divider()
+                            Button("Excluir", role: .destructive) { state.removeSavedQuery(query.id) }
+                        }
+                        Divider().opacity(0.3)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: Histórico
+
+    private var filteredHistory: [String] {
+        let query = search.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !query.isEmpty else { return session.queryHistory }
+        return session.queryHistory.filter { $0.lowercased().contains(query) }
+    }
+
+    @ViewBuilder
+    private var historyList: some View {
+        if filteredHistory.isEmpty {
+            emptyState(
+                search.isEmpty ? "Sem histórico nesta sessão" : "Nada encontrado",
+                icon: "clock.arrow.circlepath",
+                detail: search.isEmpty ? "As consultas executadas aparecem aqui." : nil
+            )
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(filteredHistory.enumerated()), id: \.offset) { _, item in
+                        Button {
+                            onPick(item, nil)
+                        } label: {
+                            Text(flatten(item))
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundStyle(.primary)
+                                .lineLimit(2)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button("Usar no editor") { onPick(item, nil) }
+                            Button("Salvar…") {
+                                pendingSaveSQL = item
+                                saveTitle = ""
+                                showingSavePrompt = true
+                            }
+                        }
+                        Divider().opacity(0.3)
+                    }
+                }
+            }
+        }
+    }
+
+    private func emptyState(_ title: String, icon: String, detail: String?) -> some View {
+        VStack(spacing: 6) {
+            Spacer()
+            Image(systemName: icon)
+                .font(.system(size: 22, weight: .light))
+                .foregroundStyle(.tertiary)
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+            if let detail {
+                Text(detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+            }
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 16)
+    }
+
+    private func flatten(_ sql: String) -> String {
+        sql.replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+            .split(separator: " ")
+            .joined(separator: " ")
     }
 }
