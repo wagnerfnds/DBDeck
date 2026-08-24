@@ -24,6 +24,12 @@ final class AppState {
     /// (ex.: ⌘P e a sidebar disparando juntos) — senão cada uma abriria um driver e o
     /// perdedor ficaria conectado para sempre.
     private var connecting: [UUID: Task<(any DatabaseDriver)?, Never>] = [:]
+    /// Túneis SSH abertos, por conexão, com contagem de usuários: o dump abre um driver
+    /// avulso para o mesmo servidor e não pode derrubar o túnel da conexão ao terminar.
+    private var tunnels: [UUID: (tunnel: SSHTunnel, users: Int)] = [:]
+    /// Aberturas em curso — como em `connecting`, chamadas concorrentes compartilham a
+    /// tentativa em vez de subir dois processos `ssh` para o mesmo servidor.
+    private var openingTunnels: [UUID: Task<SSHTunnel, any Error>] = [:]
 
     init() {
         migrateLegacyPasswords()
@@ -93,16 +99,19 @@ final class AppState {
 
     // MARK: - Conexões
 
-    func addConnection(_ config: ConnectionConfig, to workspaceID: UUID) {
+    func addConnection(_ config: ConnectionConfig, sshSecret: String? = nil, to workspaceID: UUID) {
         guard let index = workspaces.firstIndex(where: { $0.id == workspaceID }) else { return }
         KeychainManager.setPassword(config.password, for: config.id)
+        if let sshSecret { KeychainManager.setPassword(sshSecret, for: config.id, kind: .ssh) }
         var stored = config
         stored.password = ""
         workspaces[index].connections.append(stored)
         persist()
     }
 
-    func updateConnection(_ config: ConnectionConfig) {
+    /// `sshSecret` nil significa "não mexer no que está guardado" — editar o nome da
+    /// conexão não pode apagar a senha do túnel.
+    func updateConnection(_ config: ConnectionConfig, sshSecret: String? = nil) {
         guard
             let workspaceIndex = workspaces.firstIndex(where: { $0.connections.contains { $0.id == config.id } }),
             let connectionIndex = workspaces[workspaceIndex].connections.firstIndex(where: { $0.id == config.id })
@@ -111,8 +120,12 @@ final class AppState {
             Task { await driver.disconnect() }
             active[config.id] = nil
             connectionStatus[config.id] = .disconnected
+            // O túnel foi aberto para o host/porta antigos: mantê-lo apontaria a conexão
+            // reconectada para o servidor errado.
+            releaseTunnel(config.id)
         }
         KeychainManager.setPassword(config.password, for: config.id)
+        if let sshSecret { KeychainManager.setPassword(sshSecret, for: config.id, kind: .ssh) }
         var stored = config
         stored.password = ""
         workspaces[workspaceIndex].connections[connectionIndex] = stored
@@ -122,6 +135,7 @@ final class AppState {
     func deleteConnection(_ config: ConnectionConfig) {
         disconnect(config.id)
         KeychainManager.deletePassword(for: config.id)
+        KeychainManager.deletePassword(for: config.id, kind: .ssh)
         sessions[config.id] = nil
         for index in workspaces.indices {
             workspaces[index].connections.removeAll { $0.id == config.id }
@@ -177,13 +191,18 @@ final class AppState {
     func ephemeralDriver(for connectionID: UUID, database: String?) async throws -> any DatabaseDriver {
         guard var config = liveConfig(for: connectionID) else { throw DriverError.notConnected }
         if let database, !database.isEmpty { config.database = database }
+        // Reaproveita o túnel da conexão quando já existe; quem chama devolve com
+        // `releaseEphemeralTunnel(for:)`.
+        let usesTunnel = config.usesSSHTunnel
+        let routed = try await routeThroughTunnel(config)
         // Sem banco escolhido o PostgresDriver decide sozinho (postgres → nome do usuário).
-        let driver = makeDriver(config)
+        let driver = makeDriver(routed)
         do {
             try await driver.connect()
         } catch {
             // Sem isso o PostgresDriver deixa um client re-tentando para sempre em background.
             await driver.disconnect()
+            if usesTunnel { releaseTunnel(connectionID) }
             throw error
         }
         return driver
@@ -191,9 +210,16 @@ final class AppState {
 
     private func openDriver(_ config: ConnectionConfig) async -> (any DatabaseDriver)? {
         connectionStatus[config.id] = .connecting
+        let routed: ConnectionConfig
+        do {
+            routed = try await routeThroughTunnel(config)
+        } catch {
+            connectionStatus[config.id] = .failed(error.localizedDescription)
+            return nil
+        }
         // Postgres exige um banco para conectar; sem banco fixo, o driver tenta `postgres`
         // e depois o banco homônimo do usuário (servidor remoto costuma liberar só esse).
-        let driver = makeDriver(config)
+        let driver = makeDriver(routed)
         do {
             try await driver.connect()
             active[config.id] = driver
@@ -202,8 +228,75 @@ final class AppState {
         } catch {
             connectionStatus[config.id] = .failed(error.localizedDescription)
             await driver.disconnect()
+            if config.usesSSHTunnel { releaseTunnel(config.id) }
             return nil
         }
+    }
+
+    // MARK: - Túnel SSH
+
+    /// Devolve a config apontando para a ponta local do túnel. Sem SSH, devolve como está.
+    private func routeThroughTunnel(_ config: ConnectionConfig) async throws -> ConnectionConfig {
+        guard config.usesSSHTunnel else { return config }
+        let tunnel = try await acquireTunnel(config)
+        var routed = config
+        routed.host = "127.0.0.1"
+        routed.port = tunnel.localPort
+        return routed
+    }
+
+    private func acquireTunnel(_ config: ConnectionConfig) async throws -> SSHTunnel {
+        if let existing = tunnels[config.id], existing.tunnel.isRunning {
+            tunnels[config.id] = (existing.tunnel, existing.users + 1)
+            return existing.tunnel
+        }
+        if let inFlight = openingTunnels[config.id] {
+            let tunnel = try await inFlight.value
+            if let entry = tunnels[config.id], entry.tunnel === tunnel {
+                tunnels[config.id] = (tunnel, entry.users + 1)
+            }
+            return tunnel
+        }
+        // Túnel morto (rede caiu, servidor derrubou): não adianta reaproveitar.
+        tunnels[config.id]?.tunnel.close()
+        tunnels[config.id] = nil
+
+        let sshConfig = config.sshConfig
+        let remoteHost = config.host
+        let remotePort = config.port
+        let secret = sshConfig.needsSecret
+            ? KeychainManager.password(for: config.id, kind: .ssh)
+            : nil
+        let attempt = Task {
+            try await SSHTunnel.open(
+                config: sshConfig,
+                remoteHost: remoteHost,
+                remotePort: remotePort,
+                secret: secret
+            )
+        }
+        openingTunnels[config.id] = attempt
+        defer { openingTunnels[config.id] = nil }
+        let tunnel = try await attempt.value
+        tunnels[config.id] = (tunnel, 1)
+        return tunnel
+    }
+
+    /// Solta um usuário do túnel; o último a sair fecha o processo `ssh`.
+    private func releaseTunnel(_ connectionID: UUID) {
+        guard let entry = tunnels[connectionID] else { return }
+        if entry.users <= 1 {
+            entry.tunnel.close()
+            tunnels[connectionID] = nil
+        } else {
+            tunnels[connectionID] = (entry.tunnel, entry.users - 1)
+        }
+    }
+
+    /// Par do `ephemeralDriver`: quem pediu o driver avulso devolve o túnel ao terminar.
+    func releaseEphemeralTunnel(for connectionID: UUID) {
+        guard config(for: connectionID)?.usesSSHTunnel == true else { return }
+        releaseTunnel(connectionID)
     }
 
     func connect(_ connectionID: UUID) async -> Bool {
@@ -216,12 +309,24 @@ final class AppState {
     func switchDatabase(_ connectionID: UUID, to database: String) async -> Bool {
         guard var config = liveConfig(for: connectionID) else { return false }
         config.database = database
+        connectionStatus[connectionID] = .connecting
+        // O túnel serve o mesmo servidor nos dois bancos: toma-se o novo usuário ANTES de
+        // soltar o antigo, senão o último a sair fecharia o processo `ssh` e a troca de
+        // banco levantaria um túnel novo toda vez.
+        let routed: ConnectionConfig
+        do {
+            routed = try await routeThroughTunnel(config)
+        } catch {
+            connectionStatus[connectionID] = .failed(error.localizedDescription)
+            return false
+        }
         if let existing = active[connectionID] {
             await existing.disconnect()
+            // O usuário do driver antigo sai da contagem junto com ele.
+            if config.usesSSHTunnel { releaseTunnel(connectionID) }
         }
         active[connectionID] = nil
-        connectionStatus[connectionID] = .connecting
-        let driver = makeDriver(config)
+        let driver = makeDriver(routed)
         do {
             try await driver.connect()
             active[connectionID] = driver
@@ -238,6 +343,7 @@ final class AppState {
         } catch {
             connectionStatus[connectionID] = .failed(error.localizedDescription)
             await driver.disconnect()
+            if config.usesSSHTunnel { releaseTunnel(connectionID) }
             return false
         }
     }
@@ -272,6 +378,7 @@ final class AppState {
             }
             active[connectionID] = nil
             connectionStatus[connectionID] = .disconnected
+            releaseTunnel(connectionID)
             // O banco trocado em sessão morre com a conexão: reconectar volta ao banco do
             // cadastro — sem limpar, chip/subtítulo/tabelas mentiriam sobre o banco aberto.
             if let session = sessions[connectionID] {

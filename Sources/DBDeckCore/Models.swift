@@ -62,6 +62,8 @@ public struct ConnectionConfig: Codable, Identifiable, Hashable, Sendable {
     public var color: String?
     /// Bancos do servidor memorizados após a primeira listagem. Opcional.
     public var cachedDatabases: [String]?
+    /// Túnel SSH. Opcional para os JSONs gravados antes do recurso continuarem decodificando.
+    public var ssh: SSHConfig?
 
     public init(
         id: UUID = UUID(),
@@ -75,7 +77,8 @@ public struct ConnectionConfig: Codable, Identifiable, Hashable, Sendable {
         sqlitePath: String = "",
         useTLS: Bool = false,
         color: String? = nil,
-        cachedDatabases: [String]? = nil
+        cachedDatabases: [String]? = nil,
+        ssh: SSHConfig? = nil
     ) {
         self.id = id
         self.name = name
@@ -89,16 +92,24 @@ public struct ConnectionConfig: Codable, Identifiable, Hashable, Sendable {
         self.useTLS = useTLS
         self.color = color
         self.cachedDatabases = cachedDatabases
+        self.ssh = ssh
     }
 
     public var databasesCache: [String] { cachedDatabases ?? [] }
+
+    public var sshConfig: SSHConfig { ssh ?? SSHConfig() }
+
+    /// SQLite é arquivo local: não há porta para encaminhar.
+    public var usesSSHTunnel: Bool { engine != .sqlite && sshConfig.enabled }
 
     public var displaySubtitle: String {
         switch engine {
         case .sqlite:
             return sqlitePath.isEmpty ? "sem arquivo" : sqlitePath
         default:
-            return "\(host):\(port)/\(database)"
+            let target = "\(host):\(port)/\(database)"
+            // O túnel é o que explica um "localhost" que na verdade é um servidor remoto.
+            return usesSSHTunnel ? "\(target) via ssh \(sshConfig.host)" : target
         }
     }
 }
