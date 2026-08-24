@@ -927,6 +927,17 @@ public final class StatementSplitter {
     /// Lendo o valor de uma diretiva `DELIMITER` até o fim da linha.
     private var collectingDirective = false
     private var directiveValue = ""
+    /// Corpo dollar-quoted do Postgres (`$$…$$`, `$body$…$body$`). Dentro dele NADA é
+    /// interpretado — nem aspas, nem comentários, nem o delimitador: o `;` que separa os
+    /// comandos de uma function/procedure/DO block é parte do corpo. Sem isto o splitter
+    /// partia a function no primeiro `;` interno e o import morria no fragmento.
+    /// Guarda o delimitador de fechamento inteiro (`$body$`), não só o rótulo.
+    private var dollarQuote: [Character]?
+    /// Quantos caracteres do fechamento já casaram.
+    private var dollarMatched = 0
+    /// Rótulo em formação entre o primeiro `$` e o segundo (`$body$` → "body").
+    /// `nil` fora de um rótulo; `""` logo depois do `$` de abertura.
+    private var pendingDollarTag: String?
 
     public init() {}
 
@@ -971,6 +982,34 @@ public final class StatementSplitter {
                 quote = nil
             }
             return
+        }
+
+        // Dentro do corpo dollar-quoted só interessa achar o fechamento.
+        if let closing = dollarQuote {
+            append(character)
+            if character == closing[dollarMatched] {
+                dollarMatched += 1
+                if dollarMatched == closing.count {
+                    dollarQuote = nil
+                    dollarMatched = 0
+                }
+            } else {
+                // Um rótulo não pode conter `$`, então um casamento parcial que falha só
+                // pode recomeçar no próprio `$` (`$a$` dentro de um corpo `$ab$`).
+                dollarMatched = character == closing[0] ? 1 : 0
+            }
+            return
+        }
+
+        // Rótulo em formação: caracteres válidos seguem acumulando, qualquer outro
+        // desiste — é assim que o `$1` de um parâmetro do Postgres não abre corpo nenhum.
+        if let tag = pendingDollarTag, character != "$" {
+            if Self.isTagCharacter(character, isFirst: tag.isEmpty) {
+                pendingDollarTag = tag + String(character)
+                append(character)
+                return
+            }
+            pendingDollarTag = nil
         }
 
         // Diretiva `DELIMITER xx`: o valor vem ANTES de qualquer outra interpretação,
@@ -1018,6 +1057,22 @@ public final class StatementSplitter {
             blockComment = true
             blockCommentBody = 0
             append(character)
+        case "$":
+            if let tag = pendingDollarTag {
+                // Segundo `$`: fecha o rótulo e abre o corpo.
+                append(character)
+                dollarQuote = Array("$" + tag + "$")
+                dollarMatched = 0
+                pendingDollarTag = nil
+            } else {
+                // `$` colado num identificador (`meu$campo`, `tab$1`) não abre corpo:
+                // o Postgres só reconhece dollar-quote começando fora de um token.
+                let previous = current.last
+                if previous == nil || !Self.isTagCharacter(previous!, isFirst: false) {
+                    pendingDollarTag = ""
+                }
+                append(character)
+            }
         case "'", "\"", "`":
             quote = character
             append(character)
@@ -1027,6 +1082,13 @@ public final class StatementSplitter {
         default:
             append(character)
         }
+    }
+
+    /// Caracteres aceitos num rótulo de dollar-quote — as mesmas regras de um
+    /// identificador do Postgres: letra ou `_` no começo, dígitos também depois.
+    private static func isTagCharacter(_ character: Character, isFirst: Bool) -> Bool {
+        if character == "_" || character.isLetter { return true }
+        return !isFirst && character.isNumber
     }
 
     private func append(_ character: Character) {
