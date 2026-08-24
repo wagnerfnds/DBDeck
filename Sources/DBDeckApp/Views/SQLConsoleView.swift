@@ -97,7 +97,22 @@ struct SQLConsoleView: View {
                 .buttonStyle(.borderless)
             }
             if isShowingEditor {
-                SQLEditorView(text: sql, selection: editorSelection)
+                SQLEditorView(
+                    text: sql,
+                    selection: editorSelection,
+                    completions: { text, cursor in
+                        SQLCompletion.suggestions(text: text, cursor: cursor, catalog: session.completionCatalog)
+                    },
+                    prepareCompletions: { text, cursor in
+                        // As colunas chegam por consulta de metadados: pedidas quando a
+                        // tabela é citada, já estão em memória quando o `alias.` é digitado.
+                        let statement = SQLDump.statements(in: text).first { $0.contains(cursor) }?.sql ?? text
+                        session.prefetchColumns(
+                            of: SQLCompletion.referencedTables(in: statement).map(\.table),
+                            using: driver
+                        )
+                    }
+                )
                     .background(Color.gray.opacity(0.08))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .overlay(alignment: .topLeading) {

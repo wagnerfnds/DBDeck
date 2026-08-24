@@ -230,6 +230,7 @@ final class AppState {
             session.activeDatabase = database
             session.tables = []
             session.tablesLoaded = false
+            session.clearColumnCache()
             // As abas de tabela pertencem ao banco antigo — fechadas aqui para não
             // recarregarem contra o novo banco ("Table doesn't exist").
             session.closeTableTabs()
@@ -277,6 +278,7 @@ final class AppState {
                 session.activeDatabase = nil
                 session.tables = []
                 session.tablesLoaded = false
+                session.clearColumnCache()
             }
         }
     }

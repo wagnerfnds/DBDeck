@@ -1,5 +1,32 @@
 import SwiftUI
 import AppKit
+import DBDeckCore
+
+/// NSTextView que delimita a palavra a completar pelas regras de identificador SQL.
+///
+/// O padrão do AppKit usa fronteiras de palavra de texto corrido: `criado_em` viraria
+/// duas palavras e a sugestão substituiria só o pedaço depois do `_`.
+final class SQLTextView: NSTextView {
+    /// `true` enquanto uma sugestão está sendo inserida — o editor consulta para não
+    /// reabrir a lista em cima da palavra que acabou de completar (o que a reabriria
+    /// de novo, e de novo).
+    private(set) var isInsertingCompletion = false
+
+    override var rangeForUserCompletion: NSRange {
+        SQLCompletion.partialWordRange(in: string, cursor: selectedRange().location)
+    }
+
+    override func insertCompletion(
+        _ word: String,
+        forPartialWordRange charRange: NSRange,
+        movement: Int,
+        isFinal flag: Bool
+    ) {
+        isInsertingCompletion = true
+        super.insertCompletion(word, forPartialWordRange: charRange, movement: movement, isFinal: flag)
+        isInsertingCompletion = false
+    }
+}
 
 /// Cursor e seleção do editor, para o console decidir O QUE executar.
 ///
@@ -54,13 +81,19 @@ struct SQLEditorView: NSViewRepresentable {
     /// Compartilhado com o console: de lá saem "executar seleção" e "executar o
     /// comando sob o cursor".
     var selection: EditorSelectionState?
+    /// Sugestões para o texto e cursor dados. Síncrono porque é o que o NSTextView
+    /// exige — o que ainda não está em memória fica para a invocação seguinte.
+    var completions: ((String, Int) -> [String])?
+    /// Avisa que o texto mudou, para quem fornece as sugestões ir buscando em background
+    /// o que vai faltar (as colunas das tabelas recém-citadas).
+    var prepareCompletions: ((String, Int) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
     }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let textView = NSTextView()
+        let textView = SQLTextView()
         textView.delegate = context.coordinator
         textView.isRichText = false
         textView.allowsUndo = true
@@ -128,11 +161,47 @@ struct SQLEditorView: NSViewRepresentable {
             parent.text = textView.string
             parent.selection?.update(textView.selectedRange())
             highlight()
+            offerCompletions()
+        }
+
+        /// Abre a lista sozinho enquanto se digita um identificador. Esperar pelo ⌥⎋ do
+        /// AppKit faria o recurso não existir na prática — ninguém descobre o atalho.
+        /// A partir de dois caracteres (ou logo depois de um ponto, onde só cabe coluna),
+        /// para a lista não piscar a cada espaço digitado.
+        private func offerCompletions() {
+            guard parent.completions != nil,
+                  let textView = textView as? SQLTextView,
+                  !textView.isInsertingCompletion else { return }
+            let cursor = textView.selectedRange()
+            guard cursor.length == 0, cursor.location > 0 else { return }
+
+            let text = textView.string as NSString
+            let afterDot = text.character(at: cursor.location - 1) == UInt16(UInt8(ascii: "."))
+            let partial = SQLCompletion.partialWordRange(in: textView.string, cursor: cursor.location)
+            guard afterDot || partial.length >= 2 else { return }
+
+            // Depois do guarda: preparar varre o texto atrás dos FROM/JOIN, e fazer isso
+            // a cada espaço digitado seria um passe pelo script inteiro por tecla.
+            parent.prepareCompletions?(textView.string, cursor.location)
+            textView.complete(nil)
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard !isApplyingExternalText, let textView else { return }
             parent.selection?.update(textView.selectedRange())
+        }
+
+        func textView(
+            _ textView: NSTextView,
+            completions words: [String],
+            forPartialWordRange charRange: NSRange,
+            indexOfSelectedItem index: UnsafeMutablePointer<Int>?
+        ) -> [String] {
+            // O NSTextView oferece a lista do corretor ortográfico em `words`: aqui ela
+            // é descartada inteira — sugerir "select" como correção de "selct" não ajuda
+            // quem está escrevendo SQL.
+            index?.pointee = 0
+            return parent.completions?(textView.string, NSMaxRange(charRange)) ?? []
         }
 
         func highlight() {
