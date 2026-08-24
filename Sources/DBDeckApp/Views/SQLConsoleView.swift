@@ -17,6 +17,13 @@ struct SQLConsoleView: View {
     @State private var isShowingEditor = true
     @State private var selectedCell: EditCoord?
     @State private var selectedRow: Int?
+    /// Cursor e seleção do editor — decidem O QUE o ⌘⏎ executa.
+    @State private var editorSelection = EditorSelectionState()
+    /// Vivo só enquanto uma execução está em curso; cancelá-lo interrompe a leitura.
+    @State private var cancelToken: CancelToken?
+    /// O último comando do lote era um SELECT — muda o texto do estado vazio entre
+    /// "não retornou linhas" e "comando sem resultado de linhas".
+    @State private var lastWasSelect = false
     /// Fração do editor no INÍCIO do arrasto do divisor (o delta aplica sobre ela).
     @State private var dragStartFraction: Double?
 
@@ -87,7 +94,7 @@ struct SQLConsoleView: View {
                 .buttonStyle(.borderless)
             }
             if isShowingEditor {
-                SQLEditorView(text: sql)
+                SQLEditorView(text: sql, selection: editorSelection)
                     .background(Color.gray.opacity(0.08))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .overlay(alignment: .topLeading) {
@@ -103,18 +110,37 @@ struct SQLConsoleView: View {
             }
             HStack {
                 Button {
-                    Task { await run() }
+                    Task { await run(.selectionOrAll) }
                 } label: {
                     if isRunning {
                         ProgressView().controlSize(.small)
                     } else {
-                        Label("Executar", systemImage: "play.fill")
+                        Label(
+                            editorSelection.hasSelection ? "Executar seleção" : "Executar",
+                            systemImage: "play.fill"
+                        )
                     }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(isRunning || sql.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 // nil desregistra o atalho quando a aba está oculta/no split.
                 .keyboardShortcut(isActive ? KeyboardShortcut(.return, modifiers: .command) : nil)
+
+                Button {
+                    Task { await run(.statementAtCursor) }
+                } label: {
+                    Label("Comando sob o cursor", systemImage: "text.line.first.and.arrowtriangle.forward")
+                        .labelStyle(.iconOnly)
+                }
+                .disabled(isRunning || sql.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .keyboardShortcut(isActive ? KeyboardShortcut(.return, modifiers: [.command, .shift]) : nil)
+                .help("Executa só o comando onde o cursor está (⌘⇧⏎)")
+
+                if isRunning {
+                    Button("Cancelar") { cancelToken?.cancel() }
+                        .keyboardShortcut(isActive ? KeyboardShortcut(".", modifiers: .command) : nil)
+                        .help("Interrompe a leitura do resultado (⌘.)")
+                }
 
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) { tab.showLibrary.toggle() }
@@ -190,7 +216,9 @@ struct SQLConsoleView: View {
             if result.columns.isEmpty {
                 VStack {
                     Spacer()
-                    Text("Comando executado sem resultado de linhas.")
+                    Text(lastWasSelect
+                        ? "A consulta não retornou linhas."
+                        : "Comando executado sem resultado de linhas.")
                         .foregroundStyle(.secondary)
                     Spacer()
                 }
@@ -210,29 +238,140 @@ struct SQLConsoleView: View {
         }
     }
 
-    private func run() async {
+    /// O que o atalho deve executar.
+    private enum RunScope {
+        /// ⌘⏎ — a seleção quando existe, senão o editor inteiro.
+        case selectionOrAll
+        /// ⌘⇧⏎ — só o comando onde o cursor está.
+        case statementAtCursor
+    }
+
+    /// Os comandos a executar, com a faixa que cada um ocupa NO EDITOR (não no recorte):
+    /// é a faixa que destaca o comando que falhar. A regra em si vive no core, testada.
+    private func statementsToRun(_ scope: RunScope) -> [SQLStatement] {
+        switch scope {
+        case .selectionOrAll:
+            return SQLRunTarget.statements(
+                in: sql.wrappedValue,
+                selection: editorSelection.hasSelection ? editorSelection.range : nil
+            )
+        case .statementAtCursor:
+            return SQLRunTarget.statement(in: sql.wrappedValue, at: editorSelection.range.location)
+                .map { [$0] } ?? []
+        }
+    }
+
+    private func run(_ scope: RunScope) async {
+        let statements = statementsToRun(scope)
+        guard !statements.isEmpty else { return }
+
+        let token = CancelToken()
+        cancelToken = token
         isRunning = true
         errorMessage = nil
         result = nil
         message = nil
         selectedCell = nil
         selectedRow = nil
-        defer { isRunning = false }
-        let start = Date()
-        do {
-            let statement = sql.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            session.recordQuery(statement)
-            if driver.isSelectStatement(statement) {
-                let output = try await driver.query(statement)
-                result = output
-                message = "\(output.rows.count) linha\(output.rows.count == 1 ? "" : "s") · \(elapsed(since: start))"
-            } else {
-                let affected = try await driver.execute(statement)
-                message = "OK · \(affected) linha\(affected == 1 ? "" : "s") afetada\(affected == 1 ? "" : "s") · \(elapsed(since: start))"
-            }
-        } catch {
-            errorMessage = error.localizedDescription
+        defer {
+            isRunning = false
+            cancelToken = nil
         }
+
+        let start = Date()
+        var executed = 0
+        var lastResult: QueryResult?
+        var lastAffected: Int?
+        var wasSelect = false
+
+        for (index, statement) in statements.enumerated() {
+            if token.isCancelled { break }
+            session.recordQuery(statement.sql)
+            do {
+                if driver.isSelectStatement(statement.sql) {
+                    lastResult = try await collect(statement.sql, cancel: token)
+                    lastAffected = nil
+                    wasSelect = true
+                } else {
+                    lastAffected = try await driver.execute(statement.sql)
+                    lastResult = nil
+                    wasSelect = false
+                }
+                executed += 1
+            } catch is CancellationError {
+                break
+            } catch {
+                // Num script de dezenas de comandos, achar o que falhou pelo texto da
+                // mensagem do servidor é procurar agulha no palheiro: seleciona-se o
+                // comando no editor e o cursor vai junto.
+                editorSelection.select(NSRange(location: statement.location, length: statement.length))
+                errorMessage = statements.count > 1
+                    ? "Comando \(index + 1) de \(statements.count) — \(error.localizedDescription)"
+                    : error.localizedDescription
+                if executed > 0 {
+                    message = "\(executed) de \(statements.count) executado\(executed == 1 ? "" : "s") antes do erro"
+                }
+                return
+            }
+        }
+
+        lastWasSelect = wasSelect
+        result = lastResult
+        message = summary(
+            statements: statements.count,
+            executed: executed,
+            cancelled: token.isCancelled,
+            rows: lastResult?.rows.count,
+            affected: lastAffected,
+            start: start
+        )
+    }
+
+    /// Lê o resultado em lotes em vez de esperar o conjunto inteiro: é o que dá efeito ao
+    /// Cancelar — um `query` só volta quando o servidor terminou, e aí não há o que
+    /// cancelar. O que já chegou é mantido quando se cancela no meio.
+    private func collect(_ statement: String, cancel token: CancelToken) async throws -> QueryResult {
+        // Preenchido na thread de I/O do driver, uma chamada por vez.
+        final class Sink: @unchecked Sendable {
+            var columns: [String] = []
+            var rows: [[SQLValue]] = []
+        }
+        let sink = Sink()
+        do {
+            // previewLimit nil: o console mostra os valores íntegros de propósito.
+            try await driver.streamQuery(statement, batchSize: 500, previewLimit: nil) { batch in
+                if token.isCancelled { throw CancellationError() }
+                if sink.columns.isEmpty { sink.columns = batch.columns }
+                sink.rows.append(contentsOf: batch.rows)
+            }
+        } catch is CancellationError {
+            return QueryResult(columns: sink.columns, rows: sink.rows)
+        }
+        return QueryResult(columns: sink.columns, rows: sink.rows)
+    }
+
+    private func summary(
+        statements: Int,
+        executed: Int,
+        cancelled: Bool,
+        rows: Int?,
+        affected: Int?,
+        start: Date
+    ) -> String {
+        var parts: [String] = []
+        if cancelled { parts.append("Cancelado") }
+        if statements > 1 {
+            parts.append("\(executed) de \(statements) comando\(statements == 1 ? "" : "s")")
+        }
+        if let rows {
+            parts.append("\(rows) linha\(rows == 1 ? "" : "s")")
+        } else if let affected {
+            parts.append("\(affected) linha\(affected == 1 ? "" : "s") afetada\(affected == 1 ? "" : "s")")
+        } else if statements == 1 && !cancelled {
+            parts.append("OK")
+        }
+        parts.append(elapsed(since: start))
+        return parts.joined(separator: " · ")
     }
 
     private func elapsed(since start: Date) -> String {
