@@ -309,13 +309,10 @@ final class AppState {
     func switchDatabase(_ connectionID: UUID, to database: String) async -> Bool {
         guard var config = liveConfig(for: connectionID) else { return false }
         config.database = database
-        if let existing = active[connectionID] {
-            await existing.disconnect()
-        }
-        active[connectionID] = nil
         connectionStatus[connectionID] = .connecting
-        // O túnel continua servindo o mesmo servidor: trocar de banco não o derruba,
-        // só toma mais um usuário dele (o anterior é solto no fim).
+        // O túnel serve o mesmo servidor nos dois bancos: toma-se o novo usuário ANTES de
+        // soltar o antigo, senão o último a sair fecharia o processo `ssh` e a troca de
+        // banco levantaria um túnel novo toda vez.
         let routed: ConnectionConfig
         do {
             routed = try await routeThroughTunnel(config)
@@ -323,6 +320,12 @@ final class AppState {
             connectionStatus[connectionID] = .failed(error.localizedDescription)
             return false
         }
+        if let existing = active[connectionID] {
+            await existing.disconnect()
+            // O usuário do driver antigo sai da contagem junto com ele.
+            if config.usesSSHTunnel { releaseTunnel(connectionID) }
+        }
+        active[connectionID] = nil
         let driver = makeDriver(routed)
         do {
             try await driver.connect()
@@ -335,8 +338,6 @@ final class AppState {
             // As abas de tabela pertencem ao banco antigo — fechadas aqui para não
             // recarregarem contra o novo banco ("Table doesn't exist").
             session.closeTableTabs()
-            // A conexão anterior já foi fechada: o usuário dela sai da contagem agora.
-            if config.usesSSHTunnel { releaseTunnel(connectionID) }
             return true
         } catch {
             connectionStatus[connectionID] = .failed(error.localizedDescription)
