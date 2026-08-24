@@ -13,6 +13,10 @@ struct ConnectionEditView: View {
         self.workspaceID = workspaceID
     }
 
+    /// Senha ou passphrase do SSH digitada agora. Vazio significa "manter o que já está
+    /// no Keychain" — o mesmo contrato do campo de senha do banco.
+    @State private var sshSecret = ""
+
     @State private var testing = false
     @State private var testResult: String?
     @State private var databases: [String] = []
@@ -67,6 +71,10 @@ struct ConnectionEditView: View {
                     databaseField
                     Toggle("Usar TLS", isOn: $config.useTLS)
                 }
+
+                if config.engine != .sqlite {
+                    sshSection
+                }
             }
             .formStyle(.grouped)
 
@@ -97,6 +105,50 @@ struct ConnectionEditView: View {
         }
         .frame(width: 480)
         .padding(.top, 20)
+    }
+
+    /// `config.ssh` é opcional (JSONs antigos não têm o campo); aqui ele é sempre um
+    /// valor concreto para os campos do formulário.
+    private var ssh: Binding<SSHConfig> {
+        Binding(get: { config.sshConfig }, set: { config.ssh = $0 })
+    }
+
+    @ViewBuilder
+    private var sshSection: some View {
+        Section("Túnel SSH") {
+            Toggle("Conectar por um túnel SSH", isOn: ssh.enabled)
+            if config.sshConfig.enabled {
+                HStack {
+                    TextField("Servidor SSH", text: ssh.host)
+                    TextField("Porta", value: ssh.port, format: .number.grouping(.never))
+                        .frame(width: 90)
+                }
+                TextField("Usuário SSH", text: ssh.username)
+                Picker("Autenticação", selection: ssh.authMethod) {
+                    ForEach(SSHAuthMethod.allCases) { method in
+                        Text(method.displayName).tag(method)
+                    }
+                }
+                switch config.sshConfig.authMethod {
+                case .agent:
+                    Text("Usa as chaves do ssh-agent e as opções do ~/.ssh/config (inclusive ProxyJump). O app não guarda senha nenhuma.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .privateKey:
+                    HStack {
+                        TextField("Arquivo da chave", text: ssh.privateKeyPath)
+                            .font(.system(.body, design: .monospaced))
+                        Button("Procurar…") { browseForPrivateKey() }
+                    }
+                    SecureField("Passphrase da chave (se houver)", text: $sshSecret)
+                case .password:
+                    SecureField("Senha SSH", text: $sshSecret)
+                }
+                Text("O banco é alcançado como \(config.host.isEmpty ? "host" : config.host):\(config.port) a partir do servidor SSH.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     private var colorPicker: some View {
@@ -147,10 +199,15 @@ struct ConnectionEditView: View {
         loadingDatabases = true
         testResult = nil
         defer { loadingDatabases = false }
-        var live = config
-        if live.password.isEmpty {
-            live.password = KeychainManager.password(for: config.id) ?? ""
+        let live: ConnectionConfig
+        let tunnel: SSHTunnel?
+        do {
+            (live, tunnel) = try await TestConnection.prepare(config, sshSecret: sshSecret)
+        } catch {
+            testResult = "✗ \(error.localizedDescription)"
+            return
         }
+        defer { tunnel?.close() }
         // Postgres precisa de um banco para conectar; sem banco escolhido o driver tenta
         // `postgres` e depois o banco homônimo do usuário.
         let driver: any DatabaseDriver
@@ -184,10 +241,12 @@ struct ConnectionEditView: View {
     private func save() {
         let trimmedName = config.name.trimmingCharacters(in: .whitespacesAndNewlines)
         config.name = trimmedName.isEmpty ? "Sem nome" : trimmedName
+        // Campo vazio não apaga o segredo guardado: só substitui quando algo foi digitado.
+        let secret = sshSecret.isEmpty ? nil : sshSecret
         if isEditing {
-            state.updateConnection(config)
+            state.updateConnection(config, sshSecret: secret)
         } else if let workspaceID {
-            state.addConnection(config, to: workspaceID)
+            state.addConnection(config, sshSecret: secret, to: workspaceID)
         }
         dismiss()
     }
@@ -195,9 +254,23 @@ struct ConnectionEditView: View {
     private func testConnection() async {
         testing = true
         testResult = nil
-        let result = await TestConnection.run(config: config)
+        let result = await TestConnection.run(config: config, sshSecret: sshSecret)
         testResult = result
         testing = false
+    }
+
+    private func browseForPrivateKey() {
+        #if os(macOS)
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        // As chaves moram em ~/.ssh, que o painel esconde por padrão.
+        panel.showsHiddenFiles = true
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".ssh")
+        if panel.runModal() == .OK, let url = panel.url {
+            ssh.wrappedValue.privateKeyPath = url.path
+        }
+        #endif
     }
 
     private func browseForSQLiteFile() {
@@ -214,13 +287,42 @@ struct ConnectionEditView: View {
 }
 
 enum TestConnection {
-    static func run(config: ConnectionConfig) async -> String {
+    /// Config pronta para conectar — senha hidratada e, quando há SSH, apontando para um
+    /// túnel avulso. O túnel devolvido é de quem chamou fechar.
+    ///
+    /// Avulso de propósito: o formulário pode estar editando outro host/porta/credencial,
+    /// e reaproveitar o túnel da conexão ativa testaria o servidor errado.
+    static func prepare(_ config: ConnectionConfig, sshSecret: String?) async throws -> (ConnectionConfig, SSHTunnel?) {
         var live = config
         // A senha digitada agora vence a do Keychain: senão, testar uma senha nova numa
         // conexão já salva testaria silenciosamente a antiga.
         if live.password.isEmpty {
             live.password = KeychainManager.password(for: config.id) ?? ""
         }
+        guard live.usesSSHTunnel else { return (live, nil) }
+        let secret = (sshSecret?.isEmpty == false)
+            ? sshSecret
+            : KeychainManager.password(for: config.id, kind: .ssh)
+        let tunnel = try await SSHTunnel.open(
+            config: live.sshConfig,
+            remoteHost: live.host,
+            remotePort: live.port,
+            secret: secret
+        )
+        live.host = "127.0.0.1"
+        live.port = tunnel.localPort
+        return (live, tunnel)
+    }
+
+    static func run(config: ConnectionConfig, sshSecret: String? = nil) async -> String {
+        let live: ConnectionConfig
+        let tunnel: SSHTunnel?
+        do {
+            (live, tunnel) = try await prepare(config, sshSecret: sshSecret)
+        } catch {
+            return "✗ \(error.localizedDescription)"
+        }
+        defer { tunnel?.close() }
         let driver: any DatabaseDriver
         switch live.engine {
         case .postgres: driver = PostgresDriver(config: live)
