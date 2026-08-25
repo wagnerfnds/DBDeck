@@ -127,15 +127,14 @@ final class CompletionPopup: NSObject, NSTableViewDataSource, NSTableViewDelegat
         panel.orderFront(nil)
     }
 
-    /// Refiltra mantendo a linha selecionada quando ela ainda existe — quem desceu três
-    /// vezes até `pedido_itens` não quer voltar ao topo por ter digitado mais uma letra.
+    /// Refiltra e volta ao topo: cada tecla reordena a lista, e o melhor match está
+    /// sempre na primeira linha — manter a seleção antiga deixava o destaque preso lá
+    /// embaixo num item que já não era o melhor.
     func update(items: [SQLSuggestion], prefix: String, anchoredTo anchor: NSRect) {
-        let previous = selectedItem
         self.prefix = prefix
         self.items = items
         tableView.reloadData()
-        let row = previous.flatMap { item in items.firstIndex(of: item) } ?? 0
-        selectRow(row)
+        selectRow(0)
         layout(anchoredTo: anchor)
     }
 

@@ -29,10 +29,13 @@ final class CompletionTests: XCTestCase {
             tables: ["pedidos"],
             columns: ["pedidos": [SQLColumnInfo(name: "total", type: "NUMERIC(10,2)")]]
         )
-        let sugeridas = SQLCompletion.suggestions(text: "SELECT t FROM pedidos p", cursor: 8, catalog: tipado)
+        let sugeridas = SQLCompletion.suggestions(text: "SELECT to FROM pedidos p", cursor: 9, catalog: tipado)
         // Coluna traz o tipo (em minúsculas) como detalhe; tabela e keyword não têm detalhe.
-        XCTAssertEqual(sugeridas.first, SQLSuggestion(text: "total", kind: .column, detail: "numeric(10,2)"))
-        XCTAssertTrue(sugeridas.contains(SQLSuggestion(text: "TRUNCATE", kind: .keyword)))
+        XCTAssertTrue(sugeridas.contains(SQLSuggestion(text: "total", kind: .column, detail: "numeric(10,2)")))
+        // Prefixo `to`: nenhuma keyword começa assim, então a coluna vem primeiro.
+        XCTAssertEqual(sugeridas.first?.text, "total")
+        XCTAssertTrue(SQLCompletion.suggestions(text: "tr", cursor: 2, catalog: tipado)
+            .contains(SQLSuggestion(text: "TRUNCATE", kind: .keyword)))
     }
 
     func testApelidoESugeridoComATabelaComoDetalhe() {
@@ -45,29 +48,36 @@ final class CompletionTests: XCTestCase {
         XCTAssertLessThan(alias, tabela)
     }
 
-    func testPrefixoVenceSubsequencia() {
-        // "cli" é prefixo de cliente_id e subsequência de... nada aqui; mas "ci" casa
-        // `cidade`? não está no catálogo. Usamos "ie": prefixo de nada, subsequência de
-        // cliente_id/clientes — e "cl" prefixo de ambos. A ordem tem que pôr prefixo antes.
-        let sugeridas = sugestoes("SELECT * FROM clientes WHERE cl", cursorAfter: "WHERE cl")
-        XCTAssertEqual(sugeridas.first, "clientes")
-        let porSubsequencia = sugestoes("SELECT * FROM clientes WHERE ie", cursorAfter: "WHERE ie")
-        XCTAssertTrue(porSubsequencia.contains("clientes"))
-        XCTAssertTrue(porSubsequencia.contains("cliente_id") == false, "cliente_id não é da tabela citada")
+    func testQualidadeDoMatchMandaAntesDoGrupo() {
+        // "clientes" é prefixo (tabela) e "cliente_id" também; nenhuma keyword casa. Mas
+        // com "ie" nada casa por prefixo nem por início de segmento — a lista fica vazia,
+        // em vez do fuzzy antigo trazer tudo que tivesse um "i" e um "e".
+        let porPrefixo = sugestoes("SELECT * FROM clientes WHERE cl", cursorAfter: "WHERE cl")
+        XCTAssertEqual(porPrefixo.first, "clientes")
+        XCTAssertTrue(sugestoes("SELECT * FROM clientes WHERE ie", cursorAfter: "WHERE ie").isEmpty)
     }
 
-    func testSubsequenciaSoComDoisCaracteres() {
-        // Com um caractere só, subsequência casaria quase tudo: "e" está em pedidos,
-        // clientes, SELECT… A lista viraria ruído.
-        XCTAssertNil(SQLCompletion.match("pedidos", prefix: "e"))
-        XCTAssertEqual(SQLCompletion.match("pedidos", prefix: "ed"), .subsequence)
+    func testTiposDeMatch() {
+        XCTAssertEqual(SQLCompletion.match("leads", prefix: "leads"), .exact)
+        XCTAssertEqual(SQLCompletion.match("SELECT", prefix: "select"), .exact)
         XCTAssertEqual(SQLCompletion.match("pedidos", prefix: "pe"), .exactPrefix)
         XCTAssertEqual(SQLCompletion.match("pedidos", prefix: "PE"), .prefix)
+        // Início de segmento snake_case: é o que faz `leads` achar `automacao_leads`...
+        XCTAssertEqual(SQLCompletion.match("automacao_leads", prefix: "leads"), .wordStart)
+        // ...sem trazer `consultores_mensagens_cadastradas` (subsequência) junto.
+        XCTAssertNil(SQLCompletion.match("consultores_mensagens_cadastradas", prefix: "leads"))
+        XCTAssertNil(SQLCompletion.match("lead_cadencias", prefix: "leads"))
+        // Substring só a partir de três caracteres; segmento a partir de dois.
+        XCTAssertEqual(SQLCompletion.match("criado_em", prefix: "ado"), .substring)
+        XCTAssertNil(SQLCompletion.match("criado_em", prefix: "ad"))
+        XCTAssertEqual(SQLCompletion.match("criado_em", prefix: "em"), .wordStart)
+        XCTAssertNil(SQLCompletion.match("pedidos", prefix: "e"))
     }
 
     func testOffsetsCasadosParaNegrito() {
         XCTAssertEqual(SQLCompletion.matchedOffsets(in: "cliente_id", prefix: "cli"), [0, 1, 2])
-        XCTAssertEqual(SQLCompletion.matchedOffsets(in: "cliente_id", prefix: "cid"), [0, 2, 9])
+        XCTAssertEqual(SQLCompletion.matchedOffsets(in: "cliente_id", prefix: "id"), [8, 9])
+        XCTAssertEqual(SQLCompletion.matchedOffsets(in: "criado_em", prefix: "ado"), [3, 4, 5])
         XCTAssertEqual(SQLCompletion.matchedOffsets(in: "cliente_id", prefix: "xyz"), [])
     }
 
@@ -175,14 +185,28 @@ final class CompletionTests: XCTestCase {
         XCTAssertEqual(Array(sugeridas.prefix(2)), ["pedidos", "pedido_itens"])
     }
 
-    func testPalavrasChaveEntramQuandoNadaMaisCasa() {
+    func testPalavraChaveVemAntesDeTabelaComOMesmoPrefixo() {
         let sugeridas = sugestoes("SELECT * FROM pedidos WHE", cursorAfter: "WHE")
         XCTAssertEqual(sugeridas, ["WHERE", "WHEN"])
+        // Tabela e keyword começando igual: a keyword ganha (poucas e precisas).
+        let comTabela = SQLSchemaCatalog(tables: ["selecoes"])
+        let lista = SQLCompletion.suggestions(text: "sel", cursor: 3, catalog: comTabela).map(\.text)
+        XCTAssertEqual(lista.first, "SELECT")
+        XCTAssertTrue(lista.contains("selecoes"))
     }
 
-    func testNaoSugereExatamenteOQueJaEstaEscrito() {
-        let sugeridas = sugestoes("SELECT * FROM pedidos", cursorAfter: "pedidos")
-        XCTAssertFalse(sugeridas.contains("pedidos"))
+    func testMatchExatoVaiParaOTopoOuSomeQuandoSozinho() {
+        // "pedido" casa pedidos e pedido_itens por prefixo; se a tabela `pedido` existisse
+        // ela viria primeiro. Aqui testamos com clientes, que só tem ela mesma: lista vazia,
+        // para o Enter continuar quebrando linha depois de digitar o nome inteiro.
+        XCTAssertTrue(sugestoes("SELECT * FROM clientes", cursorAfter: "clientes").isEmpty)
+        // Com outros candidatos, o exato aparece em primeiro — é ele que se aceita para
+        // ganhar o espaço (tabela) ou a caixa alta (keyword).
+        // `id` existe e `cliente_id` casa por início de segmento: o exato vem primeiro.
+        let comOutros = sugestoes("SELECT id FROM pedidos", cursorAfter: "SELECT id")
+        XCTAssertEqual(comOutros.first, "id")
+        XCTAssertTrue(comOutros.contains("cliente_id"))
+        XCTAssertEqual(sugestoes("sel", cursorAfter: "sel").first, "SELECT")
     }
 
     func testSugestoesNaoSeRepetem() {

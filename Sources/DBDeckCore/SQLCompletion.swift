@@ -200,7 +200,9 @@ public enum SQLCompletion {
             candidates += columnSuggestions(catalog.columns(of: reference.table))
         }
         for reference in references {
-            if let alias = reference.alias {
+            // A palavra sendo digitada logo depois do nome da tabela É lida como apelido
+            // pelo reconhecedor (`FROM pedidos WHE`): sugerir "WHE" de volta seria ruído.
+            if let alias = reference.alias, alias.caseInsensitiveCompare(prefix) != .orderedSame {
                 candidates.append(SQLSuggestion(text: alias, kind: .alias, detail: reference.table))
             }
         }
@@ -215,28 +217,56 @@ public enum SQLCompletion {
 
     /// Como um candidato casou com o prefixo. A ordem do enum é a ordem de exibição.
     public enum Match: Int, Comparable, Sendable {
-        case exactPrefix, prefix, subsequence
+        /// O próprio texto digitado (mesma caixa ou não) — vai para o topo, como no Xcode.
+        case exact
+        /// Começa com o prefixo, na mesma caixa.
+        case exactPrefix
+        /// Começa com o prefixo, ignorando caixa.
+        case prefix
+        /// Um segmento depois de `_` começa com o prefixo: `leads` casa `automacao_leads`.
+        /// É o que faz sentido em nomes snake_case, sem o ruído do fuzzy por subsequência.
+        case wordStart
+        /// Contém o prefixo em qualquer posição — só a partir de três caracteres.
+        case substring
 
         public static func < (lhs: Match, rhs: Match) -> Bool { lhs.rawValue < rhs.rawValue }
     }
 
-    /// Filtra e ordena. A ordem de GRUPO (colunas → apelidos → tabelas → keywords) vem de
-    /// quem montou a lista e é preservada; dentro do grupo, prefixo com a mesma caixa vence
-    /// prefixo sem caixa, que vence subsequência. Repetições (ignorando caixa) somem, e
-    /// sugerir exatamente o que já está digitado só polui a lista.
+    /// Ordem de grupo dentro de um mesmo tipo de match. Palavras-chave primeiro: são
+    /// poucas e precisas — `sel` tem que mostrar SELECT antes de qualquer tabela que
+    /// comece com "sel". Depois as colunas das tabelas citadas (o que mais se digita num
+    /// SELECT/WHERE), apelidos e, por último, o catálogo inteiro de tabelas.
+    private static func groupOrder(_ kind: SQLSuggestion.Kind) -> Int {
+        switch kind {
+        case .keyword: 0
+        case .column: 1
+        case .alias: 2
+        case .table: 3
+        }
+    }
+
+    /// Filtra e ordena por (qualidade do match, grupo, ordem original). A qualidade manda
+    /// primeiro: um prefixo de qualquer grupo vence um match parcial de qualquer outro.
+    /// Repetições (ignorando caixa) somem. O match exato entra — é ele que se quer aceitar
+    /// para ganhar o espaço/caixa — a não ser que seja o ÚNICO item, quando a lista só
+    /// atrapalharia o Enter de quebrar linha.
     private static func rank(_ candidates: [SQLSuggestion], prefix: String) -> [SQLSuggestion] {
         var seen = Set<String>()
         var scored: [(order: Int, match: Match, item: SQLSuggestion)] = []
         for (order, candidate) in candidates.enumerated() {
-            guard let match = match(candidate.text, prefix: prefix) else { continue }
-            guard candidate.text.caseInsensitiveCompare(prefix) != .orderedSame else { continue }
+            guard var match = match(candidate.text, prefix: prefix) else { continue }
             guard seen.insert(candidate.text.lowercased()).inserted else { continue }
+            // Palavra-chave não perde para a caixa: quem digita `sel` quer SELECT, e a
+            // tabela `selecoes` não pode passar na frente só por estar em minúsculas.
+            if candidate.kind == .keyword, match == .prefix { match = .exactPrefix }
             scored.append((order, match, candidate))
         }
-        // Ordenação estável por (grupo, match): o `order` desempata mantendo a lista original.
+        if scored.count == 1, scored[0].match == .exact, scored[0].item.text == prefix { return [] }
         return scored
             .sorted { lhs, rhs in
                 if lhs.match != rhs.match { return lhs.match < rhs.match }
+                let lhsGroup = groupOrder(lhs.item.kind), rhsGroup = groupOrder(rhs.item.kind)
+                if lhsGroup != rhsGroup { return lhsGroup < rhsGroup }
                 return lhs.order < rhs.order
             }
             .map(\.item)
@@ -246,41 +276,50 @@ public enum SQLCompletion {
     /// negrito os caracteres casados.
     public static func match(_ candidate: String, prefix: String) -> Match? {
         guard !prefix.isEmpty else { return .prefix }
+        if candidate.caseInsensitiveCompare(prefix) == .orderedSame { return .exact }
         if candidate.hasPrefix(prefix) { return .exactPrefix }
         let lowerCandidate = candidate.lowercased()
         let lowerPrefix = prefix.lowercased()
         if lowerCandidate.hasPrefix(lowerPrefix) { return .prefix }
-        // Subsequência (`cli_id` casa `cliente_id`) só a partir de dois caracteres: com um
-        // só, quase tudo casa e a lista vira ruído.
         guard prefix.count >= 2 else { return nil }
-        return isSubsequence(lowerPrefix, of: lowerCandidate) ? .subsequence : nil
+        if segmentStarts(of: lowerCandidate).contains(where: { lowerCandidate[$0...].hasPrefix(lowerPrefix) }) {
+            return .wordStart
+        }
+        guard prefix.count >= 3 else { return nil }
+        return lowerCandidate.contains(lowerPrefix) ? .substring : nil
     }
 
     /// Índices (em UTF-16, para o `NSAttributedString` do popup) dos caracteres do
-    /// candidato que casam com o prefixo — contíguos no prefixo, espalhados na subsequência.
+    /// candidato que casam com o prefixo — sempre um trecho contíguo.
     public static func matchedOffsets(in candidate: String, prefix: String) -> [Int] {
-        guard !prefix.isEmpty else { return [] }
-        let candidateUnits = Array(candidate.lowercased().utf16)
-        let prefixUnits = Array(prefix.lowercased().utf16)
-        var offsets: [Int] = []
-        var needle = 0
-        for (offset, unit) in candidateUnits.enumerated() where needle < prefixUnits.count {
-            if unit == prefixUnits[needle] {
-                offsets.append(offset)
-                needle += 1
-            }
+        guard !prefix.isEmpty, let kind = match(candidate, prefix: prefix) else { return [] }
+        let lowerCandidate = candidate.lowercased()
+        let lowerPrefix = prefix.lowercased()
+        let location: String.Index?
+        switch kind {
+        case .exact, .exactPrefix, .prefix:
+            location = lowerCandidate.startIndex
+        case .wordStart:
+            location = segmentStarts(of: lowerCandidate).first { lowerCandidate[$0...].hasPrefix(lowerPrefix) }
+        case .substring:
+            location = lowerCandidate.range(of: lowerPrefix)?.lowerBound
         }
-        return needle == prefixUnits.count ? offsets : []
+        guard let location else { return [] }
+        let start = lowerCandidate.utf16.distance(from: lowerCandidate.startIndex, to: location)
+        return Array(start..<(start + lowerPrefix.utf16.count))
     }
 
-    private static func isSubsequence(_ needle: String, of haystack: String) -> Bool {
-        var iterator = needle.makeIterator()
-        var current = iterator.next()
-        for character in haystack {
-            guard let target = current else { return true }
-            if character == target { current = iterator.next() }
+    /// Índices onde começa cada segmento depois de `_` (o início do texto não conta —
+    /// esse é o caso de prefixo).
+    private static func segmentStarts(of text: String) -> [String.Index] {
+        var starts: [String.Index] = []
+        var index = text.startIndex
+        while let underscore = text[index...].firstIndex(of: "_") {
+            let next = text.index(after: underscore)
+            if next < text.endIndex { starts.append(next) }
+            index = next
         }
-        return current == nil
+        return starts
     }
 
     // MARK: Léxico
