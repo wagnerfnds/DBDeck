@@ -35,6 +35,7 @@ struct RowFilter: Identifiable, Equatable {
 }
 
 struct TableDataView: View {
+    @Environment(AppState.self) private var state
     @Environment(AppSettings.self) private var settings
     let driver: any DatabaseDriver
     let table: String
@@ -48,6 +49,8 @@ struct TableDataView: View {
     @State private var primaryKeys: [String] = []
     @State private var rows: [[SQLValue]] = []
     @State private var original: [[SQLValue]] = []
+    /// Índice da coluna → FK de coluna única. É o que vira a setinha de navegação no grid.
+    @State private var linkColumns: [Int: ForeignKey] = [:]
     /// Alvo das entradas de undo no UndoManager da janela — precisa ser um objeto, e a
     /// View é struct. Ligar ao UndoManager (e não a uma pilha própria) é o que faz
     /// Editar › Desfazer/Refazer e ⌘Z/⌘⇧Z funcionarem como em qualquer app do Mac.
@@ -120,6 +123,17 @@ struct TableDataView: View {
             history.apply?(row, col, previous)
         }
         undoManager.setActionName("Edição de célula")
+    }
+
+    /// Setinha de FK: abre a tabela referenciada, filtrada pelo valor desta célula.
+    private func followLink(row: Int, col: Int) {
+        guard let key = linkColumns[col], row < rows.count, col < rows[row].count else { return }
+        let value = rows[row][col]
+        guard value != .null, !value.isTruncated, let id = state.selectedConnectionID else { return }
+        state.session(for: id).openTable(
+            key.referencedTable,
+            filter: TableLinkFilter(column: key.referencedColumns[0], value: value.display)
+        )
     }
 
     /// Volta ao que veio do servidor: alterações de células e a linha nova em criação.
@@ -378,6 +392,8 @@ struct TableDataView: View {
             sortAscending: sortAscending,
             onSort: { toggleSort($0) },
             onSetValue: { row, col, value in setCell(row: row, col: col, value: value) },
+            linkColumns: Set(linkColumns.keys),
+            onFollowLink: { row, col in followLink(row: row, col: col) },
             onCopyRowAsInsert: { row in Task { await copyRowAsInsert(row) } },
             // O grid só edita valores íntegros: ao abrir a edição de uma célula cortada
             // (ou de coluna adiada) ele pede o valor real e reabre a edição quando chega.
@@ -655,7 +671,16 @@ struct TableDataView: View {
             // toda abertura de tabela, repetindo a consulta que o `columns()` já fizera.
             columns = try await driver.columns(table: table)
             primaryKeys = columns.filter(\.isPrimaryKey).map(\.name)
-            if filters.isEmpty {
+            if let link = tab?.initialFilter {
+                // Aberta pela setinha de FK: já nasce filtrada pelo valor seguido.
+                tab?.initialFilter = nil
+                var first = RowFilter()
+                first.column = link.column
+                first.value = link.value
+                filters = [first]
+                appliedFilter = whereClause(for: first)
+                showFilter = true
+            } else if filters.isEmpty {
                 var first = RowFilter()
                 first.column = primaryKeys.first ?? columns.first?.name ?? ""
                 filters = [first]
@@ -664,6 +689,14 @@ struct TableDataView: View {
             errorMessage = error.localizedDescription
         }
         await loadPage(cursor: .absolute(0), recount: true)
+        // FKs depois da primeira página: a setinha é enfeite, os dados não esperam por ela.
+        if let keys = try? await SchemaMetadata.foreignKeys(driver: driver, table: table) {
+            var links: [Int: ForeignKey] = [:]
+            for key in keys where key.isSingleColumn {
+                if let index = columns.firstIndex(where: { $0.name == key.columns[0] }) { links[index] = key }
+            }
+            linkColumns = links
+        }
     }
 
     // MARK: - Paginação

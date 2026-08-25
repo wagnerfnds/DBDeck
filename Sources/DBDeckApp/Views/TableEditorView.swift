@@ -12,16 +12,26 @@ struct TableEditorView: View {
     enum Section: String, CaseIterable, Identifiable {
         case data = "Dados"
         case structure = "Estrutura"
+        case relations = "Relações"
+        case triggers = "Triggers"
+        case info = "Info"
         var id: String { rawValue }
         var icon: String {
             switch self {
             case .data: return "tablecells"
             case .structure: return "list.bullet.rectangle"
+            case .relations: return "arrow.left.arrow.right"
+            case .triggers: return "bolt"
+            case .info: return "info.circle"
             }
         }
     }
 
+    @Environment(AppState.self) private var state
     @State private var section: Section = .data
+    /// Segmentos de metadados só nascem na primeira visita: cada um é uma consulta de
+    /// catálogo, e abrir uma tabela não pode custar quatro.
+    @State private var visited: Set<Section> = [.data, .structure]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -54,7 +64,29 @@ struct TableEditorView: View {
                 StructureView(driver: driver, table: table)
                     .opacity(section == .structure ? 1 : 0)
                     .allowsHitTesting(section == .structure)
+                if visited.contains(.relations) {
+                    RelationsView(driver: driver, table: table) { other in
+                        session?.openTable(other, newTab: true)
+                    }
+                    .opacity(section == .relations ? 1 : 0)
+                    .allowsHitTesting(section == .relations)
+                }
+                if visited.contains(.triggers) {
+                    TriggersView(driver: driver, table: table)
+                        .opacity(section == .triggers ? 1 : 0)
+                        .allowsHitTesting(section == .triggers)
+                }
+                if visited.contains(.info) {
+                    TableInfoView(driver: driver, table: table)
+                        .opacity(section == .info ? 1 : 0)
+                        .allowsHitTesting(section == .info)
+                }
             }
         }
+        .onChange(of: section) { _, new in visited.insert(new) }
+    }
+
+    private var session: ConnectionSession? {
+        state.selectedConnectionID.map { state.session(for: $0) }
     }
 }
