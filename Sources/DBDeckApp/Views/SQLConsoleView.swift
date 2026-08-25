@@ -154,7 +154,7 @@ struct SQLConsoleView: View {
                 Button {
                     editorSelection.formatSQL()
                 } label: {
-                    Label("Formatar", systemImage: "text.alignleft")
+                    Label("Formatar", systemImage: "wand.and.stars")
                         .labelStyle(.iconOnly)
                 }
                 .disabled(sql.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
