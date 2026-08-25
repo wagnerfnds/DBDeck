@@ -38,7 +38,9 @@ struct DBDeckApp: App {
 
 struct ContentView: View {
     @Environment(AppState.self) private var state
+    @Environment(AppSettings.self) private var settings
     @State private var showPalette = false
+    @State private var didAttemptReconnect = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
@@ -49,6 +51,11 @@ struct ContentView: View {
             TablesColumn()
         } detail: {
             EditorColumn()
+        }
+        .task { await reconnectLastIfWanted() }
+        .onChange(of: state.selectedConnectionID) { _, id in
+            // Só uma conexão de fato aberta vira "a última": selecionar sem conectar não conta.
+            if let id, state.active[id] != nil { settings.lastConnectionID = id }
         }
         .background {
             // Atalhos globais: ⌘P abre a paleta; ⌘B esconde/mostra a coluna de conexões.
@@ -86,6 +93,17 @@ struct ContentView: View {
                     .transition(.opacity)
             }
         }
+    }
+
+    /// "Reconectar à última conexão ao abrir". Uma tentativa só; falha aparece na sidebar
+    /// como qualquer conexão que falhou — sem alerta, o app acabou de abrir.
+    private func reconnectLastIfWanted() async {
+        guard !didAttemptReconnect else { return }
+        didAttemptReconnect = true
+        guard settings.reconnectLastOnLaunch, let id = settings.lastConnectionID,
+              state.config(for: id) != nil else { return }
+        state.selectedConnectionID = id
+        if await state.connect(id) { settings.lastConnectionID = id }
     }
 
     private func handleCloseShortcut() {
