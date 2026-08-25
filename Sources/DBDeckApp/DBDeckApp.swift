@@ -15,6 +15,11 @@ struct DBDeckApp: App {
         // Sem título no toolbar: com a sidebar recolhida (⌘B) o texto "DBDeck" ficava
         // espremido sobre o divisor de colunas. O chip de banco/cor já identifica o contexto.
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))
+        // Sem isto o menu Editar não tem o submenu Buscar, e o ⌘F não chega ao
+        // NSTextView do editor SQL (a barra de busca nativa dele fica inalcançável).
+        .commands {
+            TextEditingCommands()
+        }
     }
 }
 
@@ -44,6 +49,10 @@ struct ContentView: View {
             }
             .keyboardShortcut("b", modifiers: .command)
             .hidden()
+            // ⌘⇧F foca o filtro de tabelas (a sidebar observa focusTableFilterRequest).
+            Button("") { state.focusTableFilterRequest += 1 }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .hidden()
             // ⌘R recarrega a aba selecionada (a view da aba observa reloadRequest).
             Button("") {
                 if let id = state.selectedConnectionID, state.active[id] != nil {

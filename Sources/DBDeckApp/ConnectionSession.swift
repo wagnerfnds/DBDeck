@@ -71,6 +71,16 @@ final class ConnectionSession {
     /// Histórico de consultas executadas na sessão (mais recentes primeiro).
     var queryHistory: [String] = []
 
+    /// Colunas por tabela para o autocomplete, chaveadas em minúsculas.
+    ///
+    /// Fora da observação de propósito: quem lê é o delegate do NSTextView, e publicar
+    /// mudança aqui redesenharia o console (e o grid de resultados junto) a cada tabela
+    /// que termina de carregar.
+    @ObservationIgnored private(set) var columnCache: [String: [SQLColumnInfo]] = [:]
+    /// Tabelas com carga em curso — sem isto cada tecla digitada dispararia outra
+    /// consulta de metadados para a mesma tabela.
+    @ObservationIgnored private var columnsLoading: Set<String> = []
+
     init(connectionID: UUID) {
         self.connectionID = connectionID
     }
@@ -81,6 +91,39 @@ final class ConnectionSession {
         queryHistory.removeAll { $0 == trimmed }
         queryHistory.insert(trimmed, at: 0)
         if queryHistory.count > 30 { queryHistory.removeLast() }
+    }
+
+    // MARK: - Catálogo do autocomplete
+
+    var completionCatalog: SQLSchemaCatalog {
+        SQLSchemaCatalog(tables: tables.map(\.name), columns: columnCache)
+    }
+
+    /// Carrega em background as colunas das tabelas citadas na consulta, para a próxima
+    /// invocação do autocomplete já ter o que sugerir — o delegate do NSTextView é
+    /// síncrono e não tem como esperar por I/O.
+    func prefetchColumns(of names: [String], using driver: any DatabaseDriver) {
+        for name in names {
+            let key = name.lowercased()
+            guard columnCache[key] == nil, !columnsLoading.contains(key) else { continue }
+            // Só tabela que existe: um FROM pela metade ("FROM ped") não pode virar
+            // consulta de metadados a cada tecla.
+            guard let table = tables.first(where: { $0.name.lowercased() == key }) else { continue }
+            columnsLoading.insert(key)
+            Task { [weak self] in
+                let columns = (try? await driver.columns(table: table.name))?
+                    .map { SQLColumnInfo(name: $0.name, type: $0.type) }
+                guard let self else { return }
+                self.columnCache[key] = columns ?? []
+                self.columnsLoading.remove(key)
+            }
+        }
+    }
+
+    /// As tabelas somem ao trocar de banco: as colunas memorizadas seriam do banco antigo.
+    func clearColumnCache() {
+        columnCache.removeAll()
+        columnsLoading.removeAll()
     }
 
     var selectedTab: EditorTab? {

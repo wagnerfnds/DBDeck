@@ -7,7 +7,7 @@ A native macOS database client built with SwiftUI. Connect to **PostgreSQL**, **
 ## Features
 
 - **Multiple engines**: PostgreSQL, MySQL/MariaDB and SQLite
-- **SQL console** with syntax highlighting, multiple tabs and split view — run the selection (⌘⏎), a whole multi-statement script, or just the statement under the cursor (⌘⇧⏎), and cancel a running query (⌘.)
+- **SQL console** with syntax highlighting, autocomplete for tables and columns, multiple tabs and split view — run the selection (⌘⏎), a whole multi-statement script, or just the statement under the cursor (⌘⇧⏎), and cancel a running query (⌘.)
 - **Data grid** built for large tables — cell-based rendering and streaming pagination keep millions of rows scrollable
 - **Table structure editor** and schema DDL viewer
 - **Dump & import**: SQL dumps with progress and cancellation

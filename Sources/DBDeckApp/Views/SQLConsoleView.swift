@@ -97,19 +97,25 @@ struct SQLConsoleView: View {
                 .buttonStyle(.borderless)
             }
             if isShowingEditor {
-                SQLEditorView(text: sql, selection: editorSelection)
-                    .background(Color.gray.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .overlay(alignment: .topLeading) {
-                        if sql.wrappedValue.isEmpty {
-                            Text("SELECT * FROM minha_tabela LIMIT 100;")
-                                .font(.system(size: 13, design: .monospaced))
-                                .foregroundStyle(.tertiary)
-                                .padding(.leading, 9)
-                                .padding(.top, 8)
-                                .allowsHitTesting(false)
-                        }
+                SQLEditorView(
+                    text: sql,
+                    placeholder: "SELECT * FROM minha_tabela LIMIT 100;",
+                    selection: editorSelection,
+                    completions: { text, cursor in
+                        SQLCompletion.suggestions(text: text, cursor: cursor, catalog: session.completionCatalog)
+                    },
+                    prepareCompletions: { text, cursor in
+                        // As colunas chegam por consulta de metadados: pedidas quando a
+                        // tabela é citada, já estão em memória quando o `alias.` é digitado.
+                        let statement = SQLDump.statements(in: text).first { $0.contains(cursor) }?.sql ?? text
+                        session.prefetchColumns(
+                            of: SQLCompletion.referencedTables(in: statement).map(\.table),
+                            using: driver
+                        )
                     }
+                )
+                    .background(Color.gray.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
             }
             HStack {
                 Button {
@@ -268,6 +274,7 @@ struct SQLConsoleView: View {
         let statements = statementsToRun(scope)
         guard !statements.isEmpty else { return }
 
+        editorSelection.dismissCompletions()
         let token = CancelToken()
         cancelToken = token
         isRunning = true
@@ -563,7 +570,7 @@ private struct QueryLibraryPanel: View {
                                     .font(.system(size: 12, weight: .semibold))
                                     .lineLimit(1)
                                 Text(flatten(query.sql))
-                                    .font(.system(size: 10, design: .monospaced))
+                                    .font(Font(Theme.codeFont(size: 10)))
                                     .foregroundStyle(.secondary)
                                     .lineLimit(2)
                             }
@@ -609,7 +616,7 @@ private struct QueryLibraryPanel: View {
                             onPick(item, nil)
                         } label: {
                             Text(flatten(item))
-                                .font(.system(size: 10.5, design: .monospaced))
+                                .font(Font(Theme.codeFont(size: 10.5)))
                                 .foregroundStyle(.primary)
                                 .lineLimit(2)
                                 .frame(maxWidth: .infinity, alignment: .leading)

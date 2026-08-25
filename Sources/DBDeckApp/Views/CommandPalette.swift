@@ -16,6 +16,10 @@ struct CommandPalette: View {
     /// Janela que hospeda esta paleta: o monitor é global no app, então eventos de outras
     /// janelas (⌘N abre mais de uma) precisam passar direto.
     @State private var hostWindow: NSWindow?
+    /// Quem tinha o foco quando a paleta abriu (o editor SQL, quase sempre). Ao fechar,
+    /// o foco volta para ele — sem isto o AppKit entrega o foco ao primeiro campo de
+    /// texto da janela, o filtro de tabelas, e o usuário digita no lugar errado.
+    @State private var previousResponder = WeakResponder()
     /// Altura real do conteúdo da lista, medida via preference: o painel abraça o conteúdo
     /// até o teto em vez de ocupar altura fixa (que centralizava o campo em listas curtas).
     @State private var listHeight: CGFloat = 0
@@ -54,8 +58,13 @@ struct CommandPalette: View {
             Color.black.opacity(0.18).ignoresSafeArea().onTapGesture { close() }
         )
         .onAppear {
-            focused = true
             hostWindow = NSApp.keyWindow
+            previousResponder.value = hostWindow?.firstResponder
+            // O @FocusState não toma o foco de um NSTextView do AppKit que está como
+            // first responder (o editor SQL, na prática sempre). Solta o first responder
+            // primeiro e pede o foco no ciclo seguinte, já com a hierarquia montada.
+            hostWindow?.makeFirstResponder(nil)
+            DispatchQueue.main.async { focused = true }
             installKeyMonitor()
         }
         .onDisappear { removeKeyMonitor() }
@@ -316,7 +325,22 @@ struct CommandPalette: View {
         query = ""
         selectedID = nil
         isPresented = false
+        // Depois que a paleta sair da hierarquia — antes disso o SwiftUI ainda está
+        // com o campo dela focado e desfaria a devolução.
+        let window = hostWindow
+        let responder = previousResponder.value
+        DispatchQueue.main.async {
+            guard let responder, let window, window.isKeyWindow else { return }
+            window.makeFirstResponder(responder)
+        }
     }
+}
+
+/// Referência fraca guardável em @State: o editor pode ter sido fechado enquanto a
+/// paleta estava aberta.
+@MainActor
+private final class WeakResponder {
+    weak var value: NSResponder?
 }
 
 private struct PaletteListHeightKey: PreferenceKey {
