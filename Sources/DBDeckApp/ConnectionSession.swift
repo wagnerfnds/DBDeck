@@ -76,7 +76,7 @@ final class ConnectionSession {
     /// Fora da observação de propósito: quem lê é o delegate do NSTextView, e publicar
     /// mudança aqui redesenharia o console (e o grid de resultados junto) a cada tabela
     /// que termina de carregar.
-    @ObservationIgnored private(set) var columnCache: [String: [String]] = [:]
+    @ObservationIgnored private(set) var columnCache: [String: [SQLColumnInfo]] = [:]
     /// Tabelas com carga em curso — sem isto cada tecla digitada dispararia outra
     /// consulta de metadados para a mesma tabela.
     @ObservationIgnored private var columnsLoading: Set<String> = []
@@ -111,7 +111,8 @@ final class ConnectionSession {
             guard let table = tables.first(where: { $0.name.lowercased() == key }) else { continue }
             columnsLoading.insert(key)
             Task { [weak self] in
-                let columns = (try? await driver.columns(table: table.name))?.map(\.name)
+                let columns = (try? await driver.columns(table: table.name))?
+                    .map { SQLColumnInfo(name: $0.name, type: $0.type) }
                 guard let self else { return }
                 self.columnCache[key] = columns ?? []
                 self.columnsLoading.remove(key)

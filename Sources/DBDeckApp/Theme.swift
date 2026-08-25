@@ -14,6 +14,29 @@ enum Theme {
     static let zebra = Color.primary.opacity(0.025)
     static let selection = Color.accentColor.opacity(0.18)
     static let nullText = Color.secondary.opacity(0.55)
+
+    // MARK: Código
+
+    /// Cores de sintaxe do editor SQL e da biblioteca de consultas. Cores de sistema
+    /// para acompanharem claro/escuro e o realce de acessibilidade sem trabalho nosso.
+    static let syntaxKeyword = NSColor.systemPurple
+    static let syntaxString = NSColor.systemRed
+    static let syntaxNumber = NSColor.systemBlue
+    static let syntaxComment = NSColor.secondaryLabelColor
+    /// Fundo do comando sob o cursor — é o que o ⌘⇧⏎ vai executar.
+    static let statementBackground = NSColor.controlAccentColor.withAlphaComponent(0.07)
+    /// Linha do cursor, no gutter.
+    static let currentLineBackground = NSColor.labelColor.withAlphaComponent(0.05)
+    static let gutterText = NSColor.tertiaryLabelColor
+    static let gutterCurrentLineText = NSColor.labelColor
+
+    static func codeFont(size: CGFloat) -> NSFont {
+        .monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
+    static func codeFont(size: CGFloat, weight: NSFont.Weight) -> NSFont {
+        .monospacedSystemFont(ofSize: size, weight: weight)
+    }
 }
 
 extension SQLEngine {
