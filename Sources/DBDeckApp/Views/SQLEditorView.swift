@@ -7,13 +7,27 @@ import DBDeckCore
 /// O padrão do AppKit usa fronteiras de palavra de texto corrido: `criado_em` viraria
 /// duas palavras e a sugestão substituiria só o pedaço depois do `_`.
 final class SQLTextView: NSTextView {
-    /// `true` enquanto uma sugestão está sendo inserida — o editor consulta para não
-    /// reabrir a lista em cima da palavra que acabou de completar (o que a reabriria
-    /// de novo, e de novo).
+    /// `true` enquanto a lista de sugestões está aberta. Enquanto ela está aberta é o
+    /// AppKit que trata as teclas (filtra a lista, fecha no Esc/Enter); chamar
+    /// `complete(nil)` de novo a cada tecla reabria a lista em cima dela mesma.
+    private(set) var isCompletionActive = false
+    /// `true` enquanto uma sugestão está sendo inserida — a mudança de texto/seleção
+    /// que isso gera não é digitação do usuário.
     private(set) var isInsertingCompletion = false
 
     override var rangeForUserCompletion: NSRange {
         SQLCompletion.partialWordRange(in: string, cursor: selectedRange().location)
+    }
+
+    func beginCompletion() {
+        isCompletionActive = true
+        complete(nil)
+    }
+
+    /// Chamado pelo delegate quando não há mais sugestões: o AppKit fecha a lista sem
+    /// avisar por `insertCompletion`, e sem isto a lista nunca mais abriria.
+    func completionListEmptied() {
+        isCompletionActive = false
     }
 
     override func insertCompletion(
@@ -22,9 +36,15 @@ final class SQLTextView: NSTextView {
         movement: Int,
         isFinal flag: Bool
     ) {
+        // Só a escolha definitiva escreve no texto. O padrão do AppKit insere a sugestão
+        // destacada como PRÉVIA, com o sufixo selecionado, a cada mudança de destaque —
+        // isso deixava o editor com uma seleção fantasma (o botão virava "Executar
+        // seleção" e o ⌘⏎ executava só o sufixo) e disparava o loop de reabertura.
+        guard flag else { return }
         isInsertingCompletion = true
         super.insertCompletion(word, forPartialWordRange: charRange, movement: movement, isFinal: flag)
         isInsertingCompletion = false
+        isCompletionActive = false
     }
 }
 
@@ -171,7 +191,8 @@ struct SQLEditorView: NSViewRepresentable {
         private func offerCompletions() {
             guard parent.completions != nil,
                   let textView = textView as? SQLTextView,
-                  !textView.isInsertingCompletion else { return }
+                  !textView.isInsertingCompletion,
+                  !textView.isCompletionActive else { return }
             let cursor = textView.selectedRange()
             guard cursor.length == 0, cursor.location > 0 else { return }
 
@@ -183,11 +204,12 @@ struct SQLEditorView: NSViewRepresentable {
             // Depois do guarda: preparar varre o texto atrás dos FROM/JOIN, e fazer isso
             // a cada espaço digitado seria um passe pelo script inteiro por tecla.
             parent.prepareCompletions?(textView.string, cursor.location)
-            textView.complete(nil)
+            textView.beginCompletion()
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard !isApplyingExternalText, let textView else { return }
+            if let sqlView = textView as? SQLTextView, sqlView.isInsertingCompletion { return }
             parent.selection?.update(textView.selectedRange())
         }
 
@@ -201,7 +223,9 @@ struct SQLEditorView: NSViewRepresentable {
             // é descartada inteira — sugerir "select" como correção de "selct" não ajuda
             // quem está escrevendo SQL.
             index?.pointee = 0
-            return parent.completions?(textView.string, NSMaxRange(charRange)) ?? []
+            let words = parent.completions?(textView.string, NSMaxRange(charRange)) ?? []
+            if words.isEmpty { (textView as? SQLTextView)?.completionListEmptied() }
+            return words
         }
 
         func highlight() {

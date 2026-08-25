@@ -21,6 +21,9 @@ struct SQLConsoleView: View {
     @State private var editorSelection = EditorSelectionState()
     /// Vivo só enquanto uma execução está em curso; cancelá-lo interrompe a leitura.
     @State private var cancelToken: CancelToken?
+    /// A leitura em curso, para cancelar a Task: no Postgres é o cancelamento da Task
+    /// que manda o CancelRequest ao servidor.
+    @State private var queryTask: Task<QueryResult, any Error>?
     /// O último comando do lote era um SELECT — muda o texto do estado vazio entre
     /// "não retornou linhas" e "comando sem resultado de linhas".
     @State private var lastWasSelect = false
@@ -152,7 +155,7 @@ struct SQLConsoleView: View {
                 .help("Executa só o comando onde o cursor está (⌘⇧⏎)")
 
                 if isRunning {
-                    Button("Cancelar") { cancelToken?.cancel() }
+                    Button("Cancelar") { cancelRunningQuery() }
                         .keyboardShortcut(isActive ? KeyboardShortcut(".", modifiers: .command) : nil)
                         .help("Interrompe a leitura do resultado (⌘.)")
                 }
@@ -304,7 +307,11 @@ struct SQLConsoleView: View {
             session.recordQuery(statement.sql)
             do {
                 if driver.isSelectStatement(statement.sql) {
-                    lastResult = try await collect(statement.sql, cancel: token)
+                    let statementSQL = statement.sql
+                    let reading = Task { try await collect(statementSQL, cancel: token) }
+                    queryTask = reading
+                    defer { queryTask = nil }
+                    lastResult = try await reading.value
                     lastAffected = nil
                     wasSelect = true
                 } else {
@@ -359,10 +366,27 @@ struct SQLConsoleView: View {
                 if sink.columns.isEmpty { sink.columns = batch.columns }
                 sink.rows.append(contentsOf: batch.rows)
             }
-        } catch is CancellationError {
-            return QueryResult(columns: sink.columns, rows: sink.rows)
+        } catch {
+            // Cancelamento pode chegar de três jeitos: CancellationError (lote recusado ou
+            // Task cancelada), ou o erro do próprio servidor depois do KILL QUERY /
+            // sqlite3_interrupt. Depois de pedir para cancelar, qualquer um deles é o
+            // resultado esperado — não um erro a mostrar.
+            if error is CancellationError || token.isCancelled {
+                return QueryResult(columns: sink.columns, rows: sink.rows)
+            }
+            throw error
         }
         return QueryResult(columns: sink.columns, rows: sink.rows)
+    }
+
+    /// Três frentes, porque nenhuma cobre tudo: o token recusa o próximo lote, a Task
+    /// cancelada faz o PostgresNIO mandar CancelRequest, e `cancelRunningQuery` cobre
+    /// MySQL (KILL QUERY) e SQLite (interrupt) — que não reagem a Task cancelada.
+    private func cancelRunningQuery() {
+        cancelToken?.cancel()
+        queryTask?.cancel()
+        let driver = self.driver
+        Task { await driver.cancelRunningQuery() }
     }
 
     private func summary(
