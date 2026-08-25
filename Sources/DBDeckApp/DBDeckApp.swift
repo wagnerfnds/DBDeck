@@ -4,11 +4,18 @@ import DBDeckCore
 @main
 struct DBDeckApp: App {
     @State private var state = AppState()
+    @State private var settings = AppSettings()
+
+    init() {
+        // A aparência escolhida precisa valer antes da primeira janela desenhar.
+        AppSettings().applyAppearance()
+    }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environment(state)
+                .environment(settings)
                 .frame(minWidth: 1000, minHeight: 600)
         }
         .defaultSize(width: 1200, height: 800)
@@ -19,6 +26,12 @@ struct DBDeckApp: App {
         // NSTextView do editor SQL (a barra de busca nativa dele fica inalcançável).
         .commands {
             TextEditingCommands()
+        }
+
+        // ⌘, vem de graça com a cena Settings.
+        Settings {
+            SettingsView()
+                .environment(settings)
         }
     }
 }
