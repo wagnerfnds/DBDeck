@@ -61,6 +61,52 @@ final class DumpTests: XCTestCase {
         XCTAssertTrue(statements[0].contains(#"'a\'; b'"#))
     }
 
+    func testSplitterMantemCorpoDollarQuotedInteiro() {
+        let sql = """
+        CREATE FUNCTION soma(a int, b int) RETURNS int AS $$
+        BEGIN
+          RAISE NOTICE 'somando; com ponto e vírgula';
+          RETURN a + b;
+        END;
+        $$ LANGUAGE plpgsql;
+        SELECT soma(1, 2);
+        """
+        let statements = SQLDump.splitStatements(sql)
+        // O corpo tem três `;` internos: partir em qualquer um deles gera fragmentos inválidos.
+        XCTAssertEqual(statements.count, 2)
+        XCTAssertTrue(statements[0].contains("RETURN a + b;"))
+        XCTAssertTrue(statements[0].hasSuffix("LANGUAGE plpgsql"))
+        XCTAssertTrue(statements[1].contains("SELECT soma(1, 2)"))
+    }
+
+    func testSplitterFechaDollarQuoteSomenteNoRotuloCorreto() {
+        // `$a$` dentro de um corpo `$ab$` não fecha nada — o fechamento é o rótulo inteiro.
+        let statements = SQLDump.splitStatements("DO $ab$ SELECT $a$ x; $ab$; SELECT 1;")
+        XCTAssertEqual(statements.count, 2)
+        XCTAssertTrue(statements[0].contains("$a$ x;"))
+        XCTAssertTrue(statements[1].contains("SELECT 1"))
+    }
+
+    func testSplitterNaoConfundeCifraoDeParametroOuIdentificador() {
+        // `$1` (parâmetro) e `meu$campo` (identificador) não abrem corpo dollar-quoted:
+        // se abrissem, o `;` seguinte seria engolido e os statements virariam um só.
+        let statements = SQLDump.splitStatements("SELECT $1, meu$campo FROM t; SELECT 2;")
+        XCTAssertEqual(statements.count, 2)
+        XCTAssertTrue(statements[0].contains("$1"))
+        XCTAssertTrue(statements[1].contains("SELECT 2"))
+    }
+
+    func testSplitterIncrementalAceitaDollarQuotePartidoEntreChunks() {
+        // O import lê o arquivo em pedaços: o corpo pode ser cortado em qualquer ponto.
+        let splitter = StatementSplitter()
+        var statements = splitter.feed("DO $$ BEGIN RAISE NOTICE 'a; b';")
+        XCTAssertTrue(statements.isEmpty)
+        statements += splitter.feed(" END $$; SELECT 1;")
+        statements += splitter.finish()
+        XCTAssertEqual(statements.count, 2)
+        XCTAssertTrue(statements[0].contains("RAISE NOTICE 'a; b';"))
+    }
+
     func testSplitterNaoFechaComentarioDeBlocoCedo() {
         let statements = SQLDump.splitStatements("/*/ ainda comentário; */ SELECT 1;")
         XCTAssertEqual(statements.count, 1)
