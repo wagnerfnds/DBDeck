@@ -103,6 +103,7 @@ struct DumpExportSheet: View {
             dumpTask?.cancel()
             let orphan = driver
             driver = nil
+            if orphan != nil { state.releaseEphemeralTunnel(for: connectionID) }
             Task { await orphan?.disconnect() }
         }
     }
@@ -269,6 +270,7 @@ struct DumpExportSheet: View {
             // socket (e o event loop do driver) vazariam até o app fechar.
             if Task.isCancelled {
                 await driver.disconnect()
+                state.releaseEphemeralTunnel(for: connectionID)
                 return
             }
             self.driver = driver
