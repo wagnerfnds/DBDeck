@@ -1212,11 +1212,21 @@ final class GridTextCell: NSTextFieldCell {
         }
     }
 
-    /// Margem horizontal do texto (o cell nativo desenha colado na borda).
+    /// Margem horizontal do texto (o cell nativo desenha colado na borda) e centralização
+    /// vertical: o `NSTextFieldCell` desenha colado no topo, o que passa despercebido em
+    /// 20 pt e fica torto na altura "Normal" (24 pt). Pela métrica da fonte, e não por
+    /// `cellSize(forBounds:)`, que chama este método de volta.
     override func drawingRect(forBounds rect: NSRect) -> NSRect {
         var inset = super.drawingRect(forBounds: rect)
         inset.origin.x += 6
         inset.size.width = max(0, inset.size.width - 12)
+        let font = self.font ?? Self.valueFont
+        let textHeight = ceil(font.ascender - font.descender + font.leading)
+        let slack = inset.height - textHeight
+        if slack > 0 {
+            inset.origin.y += floor(slack / 2)
+            inset.size.height = textHeight
+        }
         return inset
     }
 
