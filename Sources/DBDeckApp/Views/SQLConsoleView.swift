@@ -152,6 +152,15 @@ struct SQLConsoleView: View {
                 }
 
                 Button {
+                    editorSelection.formatSQL()
+                } label: {
+                    Label("Formatar", systemImage: "wand.and.stars")
+                        .labelStyle(.iconOnly)
+                }
+                .disabled(sql.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .help("Formata a seleção ou a consulta inteira (⇧⌥F)")
+
+                Button {
                     withAnimation(.easeInOut(duration: 0.15)) { tab.showLibrary.toggle() }
                 } label: {
                     Label("Biblioteca", systemImage: "books.vertical")
