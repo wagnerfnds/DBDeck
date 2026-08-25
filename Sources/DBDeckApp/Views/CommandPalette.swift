@@ -54,8 +54,12 @@ struct CommandPalette: View {
             Color.black.opacity(0.18).ignoresSafeArea().onTapGesture { close() }
         )
         .onAppear {
-            focused = true
             hostWindow = NSApp.keyWindow
+            // O @FocusState não toma o foco de um NSTextView do AppKit que está como
+            // first responder (o editor SQL, na prática sempre). Solta o first responder
+            // primeiro e pede o foco no ciclo seguinte, já com a hierarquia montada.
+            hostWindow?.makeFirstResponder(nil)
+            DispatchQueue.main.async { focused = true }
             installKeyMonitor()
         }
         .onDisappear { removeKeyMonitor() }
