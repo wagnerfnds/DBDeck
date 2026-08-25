@@ -286,11 +286,35 @@ private final class CompletionCellView: NSTableCellView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
+    /// A linha selecionada é criada JÁ em destaque no primeiro desenho da lista, e o
+    /// ícone com tinta fixa cinza sumia no fundo azul até a seleção mudar e o AppKit
+    /// redesenhar. As cores acompanham o estilo de fundo explicitamente.
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet { applyColors() }
+    }
+
+    private var lastText = ""
+    private var lastPrefix = ""
+    private var lastFont = Theme.codeFont(size: 13)
+
     func configure(item: SQLSuggestion, prefix: String, font: NSFont) {
         icon.image = NSImage(systemSymbolName: Self.symbol(for: item.kind), accessibilityDescription: nil)
-        label.attributedStringValue = Self.highlighted(item.text, prefix: prefix, font: font)
+        lastText = item.text
+        lastPrefix = prefix
+        lastFont = font
         detail.stringValue = item.detail ?? ""
         detail.isHidden = item.detail == nil
+        applyColors()
+    }
+
+    private func applyColors() {
+        let emphasized = backgroundStyle == .emphasized
+        icon.contentTintColor = emphasized ? .white : .secondaryLabelColor
+        detail.textColor = emphasized ? NSColor.white.withAlphaComponent(0.75) : .tertiaryLabelColor
+        label.attributedStringValue = Self.highlighted(
+            lastText, prefix: lastPrefix, font: lastFont,
+            color: emphasized ? .white : .labelColor
+        )
     }
 
     private static func symbol(for kind: SQLSuggestion.Kind) -> String {
@@ -304,10 +328,10 @@ private final class CompletionCellView: NSTableCellView {
 
     /// Os caracteres que casaram com o que foi digitado vão em negrito — no prefixo são os
     /// primeiros; numa subsequência, espalhados.
-    private static func highlighted(_ text: String, prefix: String, font: NSFont) -> NSAttributedString {
+    private static func highlighted(_ text: String, prefix: String, font: NSFont, color: NSColor) -> NSAttributedString {
         let result = NSMutableAttributedString(string: text, attributes: [
             .font: font,
-            .foregroundColor: NSColor.labelColor,
+            .foregroundColor: color,
         ])
         let bold = Theme.codeFont(size: font.pointSize, weight: .semibold)
         for offset in SQLCompletion.matchedOffsets(in: text, prefix: prefix) where offset < result.length {
