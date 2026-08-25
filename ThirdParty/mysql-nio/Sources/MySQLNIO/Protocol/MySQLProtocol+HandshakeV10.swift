@@ -130,6 +130,16 @@ extension MySQLProtocol {
                     }
                     authPluginData = authPluginDataPart1
                     authPluginData.writeBuffer(&authPluginDataPart2)
+                    // Com CLIENT_PLUGIN_AUTH a parte 2 vem com 13 bytes: 12 do scramble e um
+                    // NUL terminador que NÃO faz parte dele. Manter o NUL dava um seed de 21
+                    // bytes; o full auth do caching_sha2 faz XOR da senha com o seed
+                    // repetido, e a partir do 21º byte o alinhamento quebrava — só senhas com
+                    // 20+ caracteres falhavam, e só sem TLS (com TLS a senha vai em claro).
+                    if capabilities.contains(.CLIENT_PLUGIN_AUTH),
+                       authPluginData.readableBytes == 21,
+                       authPluginData.getInteger(at: authPluginData.readableBytes - 1, as: UInt8.self) == 0 {
+                        authPluginData = authPluginData.getSlice(at: 0, length: 20) ?? authPluginData
+                    }
                     if !capabilities.contains(.CLIENT_PLUGIN_AUTH) {
                         guard let filler = packet.payload.readInteger(endianness: .little, as: UInt8.self), filler == 0 else {
                             throw Error.missingFiller
