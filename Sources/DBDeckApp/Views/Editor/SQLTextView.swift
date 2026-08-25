@@ -145,6 +145,11 @@ final class SQLTextView: NSTextView {
             default: break
             }
         }
+        // ⇧⌥F: o "Format Document" do VS Code.
+        if flags == [.shift, .option], event.charactersIgnoringModifiers?.lowercased() == "f" {
+            formatSQL()
+            return true
+        }
         return super.performKeyEquivalent(with: event)
     }
 
@@ -459,6 +464,25 @@ final class SQLTextView: NSTextView {
                 guard !body.isEmpty else { return line }
                 return String(indent) + "-- " + String(body)
             }
+        }
+    }
+
+    // MARK: - Formatação
+
+    /// Formata a seleção, ou o texto inteiro quando não há seleção. Uma única
+    /// substituição via `insertText` — uma entrada de undo, e o binding recebe o texto.
+    func formatSQL() {
+        dismissCompletions(suppress: false)
+        let text = string as NSString
+        let selection = selectedRange()
+        let target = selection.length > 0 ? selection : NSRange(location: 0, length: text.length)
+        guard target.length > 0 else { return }
+        let formatted = SQLFormatter.format(text.substring(with: target))
+        guard formatted != text.substring(with: target) else { return }
+        insertText(formatted, replacementRange: target)
+        // Seleção formatada continua selecionada; texto inteiro deixa o cursor no fim.
+        if selection.length > 0 {
+            setSelectedRange(NSRange(location: target.location, length: formatted.utf16.count))
         }
     }
 
