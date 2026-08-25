@@ -20,6 +20,8 @@ final class AppState {
     var active: [UUID: any DatabaseDriver] = [:]
     var connectionStatus: [UUID: ConnectionStatus] = [:]
     var sessions: [UUID: ConnectionSession] = [:]
+    /// Incrementado pelo ⌘⇧F global; a sidebar de tabelas observa e foca o filtro.
+    var focusTableFilterRequest = 0
     /// Conexões em andamento: chamadas concorrentes ao mesmo id compartilham a tentativa
     /// (ex.: ⌘P e a sidebar disparando juntos) — senão cada uma abriria um driver e o
     /// perdedor ficaria conectado para sempre.

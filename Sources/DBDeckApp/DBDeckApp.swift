@@ -49,6 +49,10 @@ struct ContentView: View {
             }
             .keyboardShortcut("b", modifiers: .command)
             .hidden()
+            // ⌘⇧F foca o filtro de tabelas (a sidebar observa focusTableFilterRequest).
+            Button("") { state.focusTableFilterRequest += 1 }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .hidden()
             // ⌘R recarrega a aba selecionada (a view da aba observa reloadRequest).
             Button("") {
                 if let id = state.selectedConnectionID, state.active[id] != nil {

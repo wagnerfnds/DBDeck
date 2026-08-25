@@ -25,6 +25,7 @@ struct TablesColumn: View {
 
 private struct TableSidebar: View {
     @Environment(AppState.self) private var state
+    @FocusState private var filterFocused: Bool
     let connectionID: UUID
     let session: ConnectionSession
 
@@ -111,6 +112,17 @@ private struct TableSidebar: View {
             Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(.secondary)
             TextField("Filtrar tabelas", text: Bindable(session).tableFilter)
                 .textFieldStyle(.plain).font(.system(size: 12))
+                .focused($filterFocused)
+                .onChange(of: state.focusTableFilterRequest) { _, _ in
+                    // Mesmo cuidado da paleta: o @FocusState não toma o foco de um
+                    // NSTextView do AppKit; solta o first responder antes.
+                    NSApp.keyWindow?.makeFirstResponder(nil)
+                    DispatchQueue.main.async { filterFocused = true }
+                }
+                .onSubmit {
+                    // Enter no filtro abre a primeira tabela que sobrou.
+                    if let first = session.filteredTables.first { session.openTable(first.name) }
+                }
             if !session.tableFilter.isEmpty {
                 Button { session.tableFilter = "" } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
