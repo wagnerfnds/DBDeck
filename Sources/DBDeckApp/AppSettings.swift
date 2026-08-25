@@ -166,10 +166,13 @@ final class AppSettings {
     /// e o painel do autocomplete, a barra de busca e os menus do grid são AppKit — herdam
     /// do app. As cores do Theme são semânticas e acompanham sozinhas.
     func applyAppearance() {
+        // `NSApplication.shared`, não `NSApp`: no `init` do App o SwiftUI ainda não criou
+        // a aplicação e `NSApp` é nil (crash na primeira abertura). `shared` cria se preciso.
+        let app = NSApplication.shared
         switch appearance {
-        case .system: NSApp.appearance = nil
-        case .light: NSApp.appearance = NSAppearance(named: .aqua)
-        case .dark: NSApp.appearance = NSAppearance(named: .darkAqua)
+        case .system: app.appearance = nil
+        case .light: app.appearance = NSAppearance(named: .aqua)
+        case .dark: app.appearance = NSAppearance(named: .darkAqua)
         }
     }
 }
