@@ -1232,10 +1232,22 @@ final class GridTextCell: NSTextFieldCell {
     static let linkWidth: CGFloat = 20
     /// Desenha a setinha e reserva espaço para ela — por célula, no `willDisplayCell`.
     var showsLink = false
-    private static let linkImage: NSImage? = {
-        let image = NSImage(systemSymbolName: "arrow.right.circle.fill", accessibilityDescription: "Abrir relação")
-        return image?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
-    }()
+    /// Imagens com handler de desenho: a cor é resolvida NA HORA de desenhar, então
+    /// acompanha claro/escuro. Desenhar o símbolo template à mão com `NSColor.set()`
+    /// não tinge nada — saía preto no tema escuro.
+    private static func makeLinkImage(color: NSColor) -> NSImage {
+        let base = NSImage(systemSymbolName: "arrow.right.circle.fill", accessibilityDescription: "Abrir relação")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
+        guard let base else { return NSImage() }
+        return NSImage(size: base.size, flipped: false) { rect in
+            base.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+            color.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+    }
+    private static let linkImage = makeLinkImage(color: .secondaryLabelColor)
+    private static let linkImageHighlighted = makeLinkImage(color: .white)
 
     /// Margem horizontal do texto (o cell nativo desenha colado na borda) e centralização
     /// vertical: o `NSTextFieldCell` desenha colado no topo, o que passa despercebido em
@@ -1257,14 +1269,12 @@ final class GridTextCell: NSTextFieldCell {
 
     override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {
         super.draw(withFrame: cellFrame, in: controlView)
-        if showsLink, let image = Self.linkImage {
+        if showsLink {
+            let image = isHighlighted ? Self.linkImageHighlighted : Self.linkImage
             let size = image.size
             let origin = NSPoint(x: cellFrame.maxX - Self.linkWidth + (Self.linkWidth - size.width) / 2,
                                  y: cellFrame.midY - size.height / 2)
-            let tinted = image.copy() as! NSImage
-            tinted.isTemplate = true
-            (isHighlighted ? NSColor.white : NSColor.secondaryLabelColor).set()
-            tinted.draw(in: NSRect(origin: origin, size: size), from: .zero, operation: .sourceOver, fraction: 0.9)
+            image.draw(in: NSRect(origin: origin, size: size), from: .zero, operation: .sourceOver, fraction: 1)
         }
         if showsSelectionRing {
             NSColor.controlAccentColor.setStroke()
