@@ -29,6 +29,10 @@ final class EditorTab: Identifiable {
     /// Fração da altura do console ocupada pelo editor SQL (arrastável pelo divisor).
     var editorFraction: Double = 0.5
 
+    /// Filtro com que a aba de tabela deve abrir (navegação pela setinha de FK). A view
+    /// consome e zera — é um estado de abertura, não de vida.
+    var initialFilter: TableLinkFilter?
+
     init(kind: Kind, title: String) {
         self.kind = kind
         self.title = title
@@ -45,6 +49,12 @@ final class EditorTab: Identifiable {
         if case .table(let name) = kind { return name }
         return nil
     }
+}
+
+/// `coluna = valor` para abrir uma tabela já filtrada (seguir uma chave estrangeira).
+struct TableLinkFilter: Equatable {
+    var column: String
+    var value: String
 }
 
 /// Estado vivo de uma conexão: lista de tabelas + abas abertas.
@@ -141,7 +151,16 @@ final class ConnectionSession {
 
     /// Abre uma tabela. Com `newTab: false` reaproveita a aba de tabela atual (preview,
     /// estilo Xcode/navegador); com `newTab: true` sempre cria uma aba nova.
-    func openTable(_ name: String, newTab: Bool = false) {
+    func openTable(_ name: String, newTab: Bool = false, filter: TableLinkFilter? = nil) {
+        // Seguir uma FK abre SEMPRE uma aba nova: reaproveitar a aba da tabela de destino
+        // jogaria fora o filtro/página que o usuário tinha lá.
+        if let filter {
+            let tab = EditorTab(kind: .table(name), title: name)
+            tab.initialFilter = filter
+            tabs.append(tab)
+            selectedTabID = tab.id
+            return
+        }
         if let existing = tabs.first(where: { $0.tableName == name }) {
             selectedTabID = existing.id
             return

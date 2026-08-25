@@ -426,7 +426,7 @@ public enum SQLDump {
     /// gerados a partir dele perdiam silenciosamente os limites das colunas no import.
     /// `format_type(atttypid, atttypmod)` devolve o tipo exato como o próprio Postgres
     /// o escreveria.
-    private static func createTablePostgres(driver: any DatabaseDriver, table: String) async throws -> String {
+    static func createTablePostgres(driver: any DatabaseDriver, table: String) async throws -> String {
         let regclass = "'\(escapeLiteral(driver.quoteIdentifier(table)))'::regclass"
         let result = try await driver.query(
             """

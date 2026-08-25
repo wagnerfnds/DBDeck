@@ -71,6 +71,9 @@ struct DataGridView: NSViewRepresentable {
     var onSort: ((String) -> Void)? = nil
     /// Escrita de valor (fim de edição, checkbox, Definir NULL). Nunca por keystroke.
     var onSetValue: ((_ row: Int, _ col: Int, _ value: SQLValue) -> Void)? = nil
+    /// Colunas de chave estrangeira (índice em `columns`): ganham a setinha de navegação.
+    var linkColumns: Set<Int> = []
+    var onFollowLink: ((_ row: Int, _ col: Int) -> Void)? = nil
     var onCopyRowAsInsert: ((Int) -> Void)? = nil
     /// `true` quando a célula tem só um prefixo (ou nem foi carregada) e precisa ser
     /// buscada no servidor antes de editar/copiar.
@@ -574,7 +577,10 @@ struct DataGridView: NSViewRepresentable {
                 textCell.applyStyle(.null)
                 return
             }
-            switch value(row: row, colIndex: colIndex) {
+            let cellValue = value(row: row, colIndex: colIndex)
+            // Setinha só onde há para onde ir: coluna de FK com valor.
+            textCell.showsLink = parent.linkColumns.contains(colIndex) && cellValue != .null && !cellValue.isTruncated
+            switch cellValue {
             case .null:
                 textCell.applyStyle(.null)
             case .blob:
@@ -631,6 +637,16 @@ struct DataGridView: NSViewRepresentable {
             if columnPosition > 0, columnPosition - 1 < parent.columns.count {
                 let colIndex = columnPosition - 1
                 setSelectedCell(EditCoord(row: row, col: colIndex))
+                // Clique na setinha de FK (faixa da direita da célula): segue a relação.
+                if parent.linkColumns.contains(colIndex), let event = NSApp.currentEvent {
+                    let point = tableView.convert(event.locationInWindow, from: nil)
+                    let frame = tableView.frameOfCell(atColumn: columnPosition, row: row)
+                    if point.x >= frame.maxX - GridTextCell.linkWidth {
+                        endActiveEditing()
+                        parent.onFollowLink?(row, colIndex)
+                        return
+                    }
+                }
                 // Checkbox: o clique simples alterna (o tracking nativo está desligado).
                 if parent.columns[colIndex].isBool, parent.editable, parent.onSetValue != nil {
                     endActiveEditing()
@@ -1212,6 +1228,27 @@ final class GridTextCell: NSTextFieldCell {
         }
     }
 
+    /// Largura reservada à setinha de FK na direita da célula.
+    static let linkWidth: CGFloat = 20
+    /// Desenha a setinha e reserva espaço para ela — por célula, no `willDisplayCell`.
+    var showsLink = false
+    /// Imagens com handler de desenho: a cor é resolvida NA HORA de desenhar, então
+    /// acompanha claro/escuro. Desenhar o símbolo template à mão com `NSColor.set()`
+    /// não tinge nada — saía preto no tema escuro.
+    private static func makeLinkImage(color: NSColor) -> NSImage {
+        let base = NSImage(systemSymbolName: "arrow.right.circle.fill", accessibilityDescription: "Abrir relação")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
+        guard let base else { return NSImage() }
+        return NSImage(size: base.size, flipped: false) { rect in
+            base.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+            color.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+    }
+    private static let linkImage = makeLinkImage(color: .secondaryLabelColor)
+    private static let linkImageHighlighted = makeLinkImage(color: .white)
+
     /// Margem horizontal do texto (o cell nativo desenha colado na borda) e centralização
     /// vertical: o `NSTextFieldCell` desenha colado no topo, o que passa despercebido em
     /// 20 pt e fica torto na altura "Normal" (24 pt). Pela métrica da fonte, e não por
@@ -1219,7 +1256,7 @@ final class GridTextCell: NSTextFieldCell {
     override func drawingRect(forBounds rect: NSRect) -> NSRect {
         var inset = super.drawingRect(forBounds: rect)
         inset.origin.x += 6
-        inset.size.width = max(0, inset.size.width - 12)
+        inset.size.width = max(0, inset.size.width - 12 - (showsLink ? Self.linkWidth : 0))
         let font = self.font ?? Self.valueFont
         let textHeight = ceil(font.ascender - font.descender + font.leading)
         let slack = inset.height - textHeight
@@ -1232,6 +1269,13 @@ final class GridTextCell: NSTextFieldCell {
 
     override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {
         super.draw(withFrame: cellFrame, in: controlView)
+        if showsLink {
+            let image = isHighlighted ? Self.linkImageHighlighted : Self.linkImage
+            let size = image.size
+            let origin = NSPoint(x: cellFrame.maxX - Self.linkWidth + (Self.linkWidth - size.width) / 2,
+                                 y: cellFrame.midY - size.height / 2)
+            image.draw(in: NSRect(origin: origin, size: size), from: .zero, operation: .sourceOver, fraction: 1)
+        }
         if showsSelectionRing {
             NSColor.controlAccentColor.setStroke()
             let ring = NSBezierPath(
