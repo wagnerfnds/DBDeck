@@ -35,6 +35,7 @@ struct RowFilter: Identifiable, Equatable {
 }
 
 struct TableDataView: View {
+    @Environment(AppSettings.self) private var settings
     let driver: any DatabaseDriver
     let table: String
     /// Aba dona desta view — observada para reagir ao ⌘R global (reloadRequest).
@@ -88,12 +89,12 @@ struct TableDataView: View {
     /// 1000 linhas por página (o mesmo default do Sequel Ace): com o corte de valores na
     /// origem e o desenho por célula visível, a página maior custa quase o mesmo e reduz
     /// pela metade os cliques de paginação — que é onde mora o OFFSET caro.
-    private let pageSize = 1000
+    private var pageSize: Int { settings.pageSize }
 
     /// Caracteres/bytes trazidos por célula no grid. Uma célula tem ~160 px: acima disto
     /// nada é visível, e materializar o valor inteiro era o que fazia uma página com uma
     /// coluna TEXT custar centenas de MB. Ver `SQLValue.truncated`.
-    private let previewLimit = 256
+    private var previewLimit: Int { settings.previewLimit }
 
     /// Lote de linhas por publicação durante o streaming da página.
     private let streamBatchSize = 100
@@ -161,6 +162,14 @@ struct TableDataView: View {
         .task { await load() }
         .onChange(of: tab?.reloadRequest) { _, _ in
             runGuarded { reloadCurrentPage() }
+        }
+        // Linhas por página / prévia por célula mudaram nas preferências: a página
+        // atual é recarregada com os valores novos (o offset fica).
+        .onChange(of: settings.pageSize) { _, _ in
+            runGuarded { reloadCurrentPage(recount: false) }
+        }
+        .onChange(of: settings.previewLimit) { _, _ in
+            runGuarded { reloadCurrentPage(recount: false) }
         }
         .confirmationDialog(
             "Há alterações não salvas",
@@ -363,6 +372,7 @@ struct TableDataView: View {
                 }
             }
         )
+        .gridStyle(rowHeight: settings.rowHeight, zebra: settings.zebraStripes)
         .background(Color(nsColor: .textBackgroundColor))
     }
 
