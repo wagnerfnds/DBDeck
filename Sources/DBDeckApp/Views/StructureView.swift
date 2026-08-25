@@ -2,6 +2,7 @@ import SwiftUI
 import DBDeckCore
 
 struct StructureView: View {
+    @Environment(AppSettings.self) private var settings
     let driver: any DatabaseDriver
     let table: String
 
@@ -162,14 +163,14 @@ struct StructureView: View {
                 width: wDefault, last: true
             )
         }
-        .background(index % 2 == 1 ? Theme.zebra : Color.clear)
+        .background(index % 2 == 1 && settings.zebraStripes ? Theme.zebra : Color.clear)
     }
 
     private func cell(_ content: some View, width: CGFloat, last: Bool = false) -> some View {
         content
             .font(.system(size: 12, design: .monospaced))
             .lineLimit(1)
-            .frame(width: width, height: Theme.rowHeight, alignment: .leading)
+            .frame(width: width, height: settings.rowHeight, alignment: .leading)
             .padding(.horizontal, 8)
             .overlay(alignment: .trailing) { if !last { Rectangle().fill(Theme.gridLine).frame(width: 1) } }
     }

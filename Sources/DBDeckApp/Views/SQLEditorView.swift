@@ -59,8 +59,8 @@ final class EditorSelectionState {
 /// Editor de SQL: `SQLTextView` (teclado, autocomplete, indentação) dentro de um scroll
 /// view com gutter de números de linha. Sem dependências.
 struct SQLEditorView: NSViewRepresentable {
+    @Environment(AppSettings.self) private var settings
     @Binding var text: String
-    var fontSize: CGFloat = 13
     var placeholder: String?
     /// Compartilhado com o console: de lá saem "executar seleção" e "executar o
     /// comando sob o cursor".
@@ -77,7 +77,9 @@ struct SQLEditorView: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let textView = SQLTextView.make(fontSize: fontSize)
+        let textView = SQLTextView.make(fontSize: settings.editorFontSize)
+        context.coordinator.fontSize = settings.editorFontSize
+        applySettings(to: textView)
         textView.delegate = context.coordinator
         textView.placeholder = placeholder
         textView.completionProvider = completions
@@ -110,6 +112,22 @@ struct SQLEditorView: NSViewRepresentable {
         textView.completionProvider = completions
         textView.prepareCompletions = prepareCompletions
         textView.placeholder = placeholder
+        applySettings(to: textView)
+        // Fonte mudou nas preferências: reaplica no storage inteiro (o highlight já faz
+        // isso) e realinha o gutter. O popup fecha porque a âncora dele mudou de lugar.
+        if context.coordinator.fontSize != settings.editorFontSize {
+            context.coordinator.fontSize = settings.editorFontSize
+            textView.dismissCompletions(suppress: false)
+            let font = Theme.codeFont(size: settings.editorFontSize)
+            textView.font = font
+            textView.typingAttributes[.font] = font
+            context.coordinator.highlight()
+            context.coordinator.ruler?.invalidateLineStarts()
+        }
+        if context.coordinator.highlightEnabled != settings.highlightStatement {
+            context.coordinator.highlightEnabled = settings.highlightStatement
+            context.coordinator.refreshDecorations()
+        }
         // Mudança vinda de fora (biblioteca, histórico): substitui preservando o cursor
         // no que der; a checagem evita re-highlight e loop de eco a cada tecla.
         if textView.string != text {
@@ -129,11 +147,22 @@ struct SQLEditorView: NSViewRepresentable {
         }
     }
 
+    /// Preferências que a text view guarda como estado próprio (ela não lê environment).
+    private func applySettings(to textView: SQLTextView) {
+        textView.indentUnit = settings.indentUnit
+        textView.automaticCompletion = settings.autoCompletion
+        textView.statementHighlightEnabled = settings.highlightStatement
+        textView.formatterOptions = settings.formatterOptions
+    }
+
     @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: SQLEditorView
         weak var textView: SQLTextView?
         weak var ruler: LineNumberRulerView?
+        /// Snapshots das preferências — o delegate nunca lê o environment.
+        var fontSize: Double = AppSettings.defaultFontSize
+        var highlightEnabled = true
         /// Ver `updateNSView`: silencia a publicação da seleção durante o redesenho.
         var isApplyingExternalText = false
 
@@ -161,7 +190,7 @@ struct SQLEditorView: NSViewRepresentable {
 
         func highlight() {
             guard let textView, let storage = textView.textStorage else { return }
-            SQLSyntaxHighlighter.highlight(storage, fontSize: parent.fontSize)
+            SQLSyntaxHighlighter.highlight(storage, fontSize: fontSize)
         }
 
         /// Realce do comando sob o cursor + linha atual no gutter.
