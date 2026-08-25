@@ -10,7 +10,12 @@ import DBDeckCore
 /// text view decide o que cada tecla faz e o popup só desenha.
 @MainActor
 final class SQLTextView: NSTextView {
-    static let indentUnit = "    "
+    static let defaultIndentUnit = "    "
+    /// Vêm das preferências, via `SQLEditorView`.
+    var indentUnit = SQLTextView.defaultIndentUnit
+    var automaticCompletion = true
+    var statementHighlightEnabled = true
+    var formatterOptions = SQLFormatter.Options()
 
     let completionPopup = CompletionPopup()
     /// Sugestões para (texto, cursor). Síncrono e em memória: o que ainda não chegou do
@@ -190,7 +195,7 @@ final class SQLTextView: NSTextView {
         case #selector(insertNewline(_:)):
             insertNewlineKeepingIndent()
         case #selector(insertTab(_:)):
-            if selectionSpansMultipleLines() { indentSelection() } else { insertText(Self.indentUnit, replacementRange: selectedRange()) }
+            if selectionSpansMultipleLines() { indentSelection() } else { insertText(indentUnit, replacementRange: selectedRange()) }
         case #selector(insertBacktab(_:)):
             outdentSelection()
         case #selector(deleteBackward(_:)):
@@ -232,6 +237,9 @@ final class SQLTextView: NSTextView {
 
     private func afterTyping() {
         suppressUntilNextInsert = false
+        // Com a sugestão automática desligada a lista só abre por ⌃Space — mas uma lista
+        // já aberta continua acompanhando a digitação.
+        guard automaticCompletion || completionPopup.isVisible else { return }
         refreshCompletions(fromTyping: true)
     }
 
@@ -401,7 +409,7 @@ final class SQLTextView: NSTextView {
         let line = text.substring(with: lineRange(for: NSRange(location: selection.location, length: 0)))
         let indent = String(line.prefix { $0 == " " || $0 == "\t" })
         if previousCharacter() == "(", nextCharacter() == ")" {
-            let inner = "\n" + indent + Self.indentUnit
+            let inner = "\n" + indent + indentUnit
             insertText(inner + "\n" + indent, replacementRange: selection)
             setSelectedRange(NSRange(location: selection.location + inner.utf16.count, length: 0))
         } else {
@@ -430,14 +438,14 @@ final class SQLTextView: NSTextView {
 
     func indentSelection() {
         transformSelectedLines { lines in
-            lines.map { $0.isEmpty ? $0 : Self.indentUnit + $0 }
+            lines.map { $0.isEmpty ? $0 : self.indentUnit + $0 }
         }
     }
 
     func outdentSelection() {
         transformSelectedLines { lines in
             lines.map { line in
-                if line.hasPrefix(Self.indentUnit) { return String(line.dropFirst(Self.indentUnit.count)) }
+                if line.hasPrefix(self.indentUnit) { return String(line.dropFirst(self.indentUnit.count)) }
                 if line.hasPrefix("\t") { return String(line.dropFirst()) }
                 return String(line.drop { $0 == " " })
             }
@@ -477,7 +485,7 @@ final class SQLTextView: NSTextView {
         let selection = selectedRange()
         let target = selection.length > 0 ? selection : NSRange(location: 0, length: text.length)
         guard target.length > 0 else { return }
-        let formatted = SQLFormatter.format(text.substring(with: target))
+        let formatted = SQLFormatter.format(text.substring(with: target), options: formatterOptions)
         guard formatted != text.substring(with: target) else { return }
         insertText(formatted, replacementRange: target)
         // Seleção formatada continua selecionada; texto inteiro deixa o cursor no fim.
@@ -495,7 +503,7 @@ final class SQLTextView: NSTextView {
         guard let layoutManager else { return }
         let text = string as NSString
         var target: NSRange?
-        if text.length <= 256_000 {
+        if statementHighlightEnabled, text.length <= 256_000 {
             let statements = SQLDump.statements(in: string)
             if statements.count > 1 {
                 let cursor = selectedRange().location
