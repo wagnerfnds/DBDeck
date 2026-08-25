@@ -99,6 +99,7 @@ struct SQLConsoleView: View {
             if isShowingEditor {
                 SQLEditorView(
                     text: sql,
+                    placeholder: "SELECT * FROM minha_tabela LIMIT 100;",
                     selection: editorSelection,
                     completions: { text, cursor in
                         SQLCompletion.suggestions(text: text, cursor: cursor, catalog: session.completionCatalog)
@@ -114,17 +115,7 @@ struct SQLConsoleView: View {
                     }
                 )
                     .background(Color.gray.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .overlay(alignment: .topLeading) {
-                        if sql.wrappedValue.isEmpty {
-                            Text("SELECT * FROM minha_tabela LIMIT 100;")
-                                .font(.system(size: 13, design: .monospaced))
-                                .foregroundStyle(.tertiary)
-                                .padding(.leading, 9)
-                                .padding(.top, 8)
-                                .allowsHitTesting(false)
-                        }
-                    }
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.cornerRadius))
             }
             HStack {
                 Button {
@@ -283,6 +274,7 @@ struct SQLConsoleView: View {
         let statements = statementsToRun(scope)
         guard !statements.isEmpty else { return }
 
+        editorSelection.dismissCompletions()
         let token = CancelToken()
         cancelToken = token
         isRunning = true
@@ -578,7 +570,7 @@ private struct QueryLibraryPanel: View {
                                     .font(.system(size: 12, weight: .semibold))
                                     .lineLimit(1)
                                 Text(flatten(query.sql))
-                                    .font(.system(size: 10, design: .monospaced))
+                                    .font(Font(Theme.codeFont(size: 10)))
                                     .foregroundStyle(.secondary)
                                     .lineLimit(2)
                             }
@@ -624,7 +616,7 @@ private struct QueryLibraryPanel: View {
                             onPick(item, nil)
                         } label: {
                             Text(flatten(item))
-                                .font(.system(size: 10.5, design: .monospaced))
+                                .font(Font(Theme.codeFont(size: 10.5)))
                                 .foregroundStyle(.primary)
                                 .lineLimit(2)
                                 .frame(maxWidth: .infinity, alignment: .leading)

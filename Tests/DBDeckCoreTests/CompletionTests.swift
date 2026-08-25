@@ -14,7 +14,91 @@ final class CompletionTests: XCTestCase {
     private func sugestoes(_ text: String, cursorAfter marcador: String) -> [String] {
         let cursor = (text as NSString).range(of: marcador)
         XCTAssertNotEqual(cursor.location, NSNotFound, "marcador não encontrado")
+        return SQLCompletion.suggestions(text: text, cursor: NSMaxRange(cursor), catalog: catalog).map(\.text)
+    }
+
+    private func itens(_ text: String, cursorAfter marcador: String) -> [SQLSuggestion] {
+        let cursor = (text as NSString).range(of: marcador)
         return SQLCompletion.suggestions(text: text, cursor: NSMaxRange(cursor), catalog: catalog)
+    }
+
+    // MARK: - Tipo, categoria e ranking
+
+    func testSugestaoTemCategoriaEDetalhe() {
+        let tipado = SQLSchemaCatalog(
+            tables: ["pedidos"],
+            columns: ["pedidos": [SQLColumnInfo(name: "total", type: "NUMERIC(10,2)")]]
+        )
+        let sugeridas = SQLCompletion.suggestions(text: "SELECT t FROM pedidos p", cursor: 8, catalog: tipado)
+        // Coluna traz o tipo (em minúsculas) como detalhe; tabela e keyword não têm detalhe.
+        XCTAssertEqual(sugeridas.first, SQLSuggestion(text: "total", kind: .column, detail: "numeric(10,2)"))
+        XCTAssertTrue(sugeridas.contains(SQLSuggestion(text: "TRUNCATE", kind: .keyword)))
+    }
+
+    func testApelidoESugeridoComATabelaComoDetalhe() {
+        // "pe" e não "ped": sugerir exatamente o que já está digitado é descartado.
+        let sugeridas = itens("SELECT pe FROM pedidos ped", cursorAfter: "SELECT pe")
+        XCTAssertTrue(sugeridas.contains(SQLSuggestion(text: "ped", kind: .alias, detail: "pedidos")))
+        // Vem depois das colunas da tabela e antes das tabelas do catálogo.
+        let alias = sugeridas.firstIndex { $0.kind == .alias }!
+        let tabela = sugeridas.firstIndex { $0.kind == .table }!
+        XCTAssertLessThan(alias, tabela)
+    }
+
+    func testPrefixoVenceSubsequencia() {
+        // "cli" é prefixo de cliente_id e subsequência de... nada aqui; mas "ci" casa
+        // `cidade`? não está no catálogo. Usamos "ie": prefixo de nada, subsequência de
+        // cliente_id/clientes — e "cl" prefixo de ambos. A ordem tem que pôr prefixo antes.
+        let sugeridas = sugestoes("SELECT * FROM clientes WHERE cl", cursorAfter: "WHERE cl")
+        XCTAssertEqual(sugeridas.first, "clientes")
+        let porSubsequencia = sugestoes("SELECT * FROM clientes WHERE ie", cursorAfter: "WHERE ie")
+        XCTAssertTrue(porSubsequencia.contains("clientes"))
+        XCTAssertTrue(porSubsequencia.contains("cliente_id") == false, "cliente_id não é da tabela citada")
+    }
+
+    func testSubsequenciaSoComDoisCaracteres() {
+        // Com um caractere só, subsequência casaria quase tudo: "e" está em pedidos,
+        // clientes, SELECT… A lista viraria ruído.
+        XCTAssertNil(SQLCompletion.match("pedidos", prefix: "e"))
+        XCTAssertEqual(SQLCompletion.match("pedidos", prefix: "ed"), .subsequence)
+        XCTAssertEqual(SQLCompletion.match("pedidos", prefix: "pe"), .exactPrefix)
+        XCTAssertEqual(SQLCompletion.match("pedidos", prefix: "PE"), .prefix)
+    }
+
+    func testOffsetsCasadosParaNegrito() {
+        XCTAssertEqual(SQLCompletion.matchedOffsets(in: "cliente_id", prefix: "cli"), [0, 1, 2])
+        XCTAssertEqual(SQLCompletion.matchedOffsets(in: "cliente_id", prefix: "cid"), [0, 2, 9])
+        XCTAssertEqual(SQLCompletion.matchedOffsets(in: "cliente_id", prefix: "xyz"), [])
+    }
+
+    // MARK: - Gatilho
+
+    func testGatilhoAbreEmIdentificadorEDepoisDoPonto() {
+        XCTAssertEqual(SQLCompletion.trigger(in: "SELECT c", cursor: 8), .identifier)
+        XCTAssertEqual(SQLCompletion.trigger(in: "SELECT p.", cursor: 9), .afterDot)
+        XCTAssertEqual(SQLCompletion.trigger(in: "SELECT p.no", cursor: 11), .afterDot)
+    }
+
+    func testGatilhoNaoAbreDepoisDeEspacoOuPontuacao() {
+        XCTAssertEqual(SQLCompletion.trigger(in: "SELECT ", cursor: 7), .none)
+        XCTAssertEqual(SQLCompletion.trigger(in: "SELECT a,", cursor: 9), .none)
+        XCTAssertEqual(SQLCompletion.trigger(in: "", cursor: 0), .none)
+    }
+
+    func testGatilhoNaoAbreDentroDeStringOuComentario() {
+        XCTAssertEqual(SQLCompletion.trigger(in: "SELECT 'ab", cursor: 10), .none)
+        XCTAssertEqual(SQLCompletion.trigger(in: "SELECT 'it''s a", cursor: 15), .none, "'' continua a string")
+        XCTAssertEqual(SQLCompletion.trigger(in: "SELECT 'x' , ab", cursor: 15), .identifier, "string fechada")
+        XCTAssertEqual(SQLCompletion.trigger(in: "-- sel", cursor: 6), .none)
+        XCTAssertEqual(SQLCompletion.trigger(in: "-- x\nsel", cursor: 8), .identifier, "comentário acabou na quebra")
+        XCTAssertEqual(SQLCompletion.trigger(in: "/* sel", cursor: 6), .none)
+        XCTAssertEqual(SQLCompletion.trigger(in: "/* a */ sel", cursor: 11), .identifier)
+    }
+
+    func testCatalogoLegadoPorNomesContinuaValido() {
+        let legado = SQLSchemaCatalog(tables: ["t"], columns: ["t": ["a", "b"]])
+        XCTAssertEqual(legado.columns(of: "T").map(\.name), ["a", "b"])
+        XCTAssertNil(legado.columns(of: "t").first?.type)
     }
 
     // MARK: - Palavra sob o cursor
@@ -112,7 +196,7 @@ final class CompletionTests: XCTestCase {
         // da tabela citada só na primeira.
         let text = "SELECT * FROM pedidos p;\nSELECT c. FROM clientes c;"
         let cursor = NSMaxRange((text as NSString).range(of: "c."))
-        let sugeridas = SQLCompletion.suggestions(text: text, cursor: cursor, catalog: catalog)
+        let sugeridas = SQLCompletion.suggestions(text: text, cursor: cursor, catalog: catalog).map(\.text)
         XCTAssertEqual(sugeridas, ["id", "nome", "email"])
     }
 }
