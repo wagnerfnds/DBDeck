@@ -87,6 +87,12 @@ public protocol DatabaseDriver: Sendable {
         onBatch: @escaping @Sendable (RowBatch) throws -> Void
     ) async throws
 
+    /// Interrompe NO SERVIDOR a consulta em execução nesta conexão. Parar de ler o
+    /// resultado não basta: uma consulta que ainda está computando (um JOIN pesado antes
+    /// da primeira linha) nunca entrega lote nenhum para o cancelamento agir — e um
+    /// result set já em curso continua chegando até o servidor terminar.
+    func cancelRunningQuery() async
+
     func quoteIdentifier(_ name: String) -> String
 }
 
@@ -94,6 +100,9 @@ public extension DatabaseDriver {
     func quoteIdentifier(_ name: String) -> String {
         engine.quote(name)
     }
+
+    /// Drivers sem interrupção nativa: o cancelamento fica só do lado do cliente.
+    func cancelRunningQuery() async {}
 
     func isSelectStatement(_ sql: String) -> Bool {
         let trimmed = sql.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
