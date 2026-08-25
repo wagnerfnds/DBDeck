@@ -20,6 +20,7 @@ struct SidebarSelection: Hashable {
 }
 
 struct SidebarView: View {
+    @Environment(AppSettings.self) private var settings
     @Environment(AppState.self) private var state
 
     @State private var selection: SidebarSelection?
@@ -49,7 +50,7 @@ struct SidebarView: View {
             ConnectionEditView(config: connection, workspaceID: state.workspace(for: connection.id)?.id)
         }
         .sheet(item: $newConnectionWorkspace) { target in
-            ConnectionEditView(config: ConnectionConfig(), workspaceID: target.workspaceID)
+            ConnectionEditView(config: ConnectionConfig(engine: settings.defaultEngine, port: settings.defaultEngine.defaultPort), workspaceID: target.workspaceID)
         }
         .sheet(item: $dumpTarget) { target in
             DumpExportSheet(

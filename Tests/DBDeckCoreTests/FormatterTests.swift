@@ -107,6 +107,17 @@ final class FormatterTests: XCTestCase {
         XCTAssertEqual(f(uma), uma)
     }
 
+    func testIndentDoisEspacos() {
+        let saida = SQLFormatter.format("select a, b from t where x = 1 and y = 2", options: .init(indentUnit: "  "))
+        XCTAssertEqual(saida, "SELECT\n  a,\n  b\nFROM t\nWHERE x = 1\n  AND y = 2")
+    }
+
+    func testSemCaixaAlta() {
+        // Estrutura igual, só a caixa das reservadas fica como o usuário escreveu.
+        let saida = SQLFormatter.format("select a from t where x = 1", options: .init(uppercaseKeywords: false))
+        XCTAssertEqual(saida, "select a\nfrom t\nwhere x = 1")
+    }
+
     func testCastEOperadoresCompostos() {
         XCTAssertEqual(f("select a::text, b <> c, d || e from t"), "SELECT\n    a::text,\n    b <> c,\n    d || e\nFROM t")
     }

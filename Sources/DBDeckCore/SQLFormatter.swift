@@ -11,11 +11,23 @@ import Foundation
 public enum SQLFormatter {
     public static let indentUnit = "    "
 
-    public static func format(_ sql: String) -> String {
+    /// O que o usuário pode ajustar. Entra por parâmetro: o core não conhece preferências.
+    public struct Options: Sendable, Equatable {
+        public var indentUnit: String
+        /// Palavras reservadas em caixa alta. Desligado, saem como foram escritas.
+        public var uppercaseKeywords: Bool
+
+        public init(indentUnit: String = SQLFormatter.indentUnit, uppercaseKeywords: Bool = true) {
+            self.indentUnit = indentUnit
+            self.uppercaseKeywords = uppercaseKeywords
+        }
+    }
+
+    public static func format(_ sql: String, options: Options = Options()) -> String {
         var tokenizer = Tokenizer(sql)
         let tokens = tokenizer.tokenize()
         guard !tokens.isEmpty else { return sql.trimmingCharacters(in: .whitespacesAndNewlines) }
-        let printer = Printer(tokens: tokens)
+        let printer = Printer(tokens: tokens, options: options)
         return printer.run()
     }
 
@@ -229,8 +241,11 @@ public enum SQLFormatter {
         private var position = 0
         private var phraseLength = 1
 
-        init(tokens: [Token]) {
+        private let options: Options
+
+        init(tokens: [Token], options: Options) {
             self.tokens = tokens
+            self.options = options
         }
 
         private var indent: Int { indentStack.last ?? 0 }
@@ -277,7 +292,7 @@ public enum SQLFormatter {
                 // Linha já vazia: só troca a indentação pendente.
                 while out.last == " " { out.removeLast() }
             }
-            out += String(repeating: SQLFormatter.indentUnit, count: max(0, level))
+            out += String(repeating: options.indentUnit, count: max(0, level))
             lineIsEmpty = true
         }
 
@@ -375,7 +390,7 @@ public enum SQLFormatter {
 
             // Palavras: cláusulas, joins, AND/OR, CASE, ou identificador.
             let text = SQLFormatter.reserved.contains(upper) || SQLFormatter.clauses.contains(upper) || SQLFormatter.joins.contains(upper)
-                ? upper : token.text
+                ? (options.uppercaseKeywords ? upper : token.text) : token.text
 
             if SQLFormatter.clauses.contains(upper) {
                 // Dentro de um parêntese inline (`IN (SELECT …)` curto) não abre bloco.

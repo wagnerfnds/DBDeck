@@ -60,6 +60,9 @@ struct DataGridView: NSViewRepresentable {
     /// Página ainda chegando: linhas só crescem no fim, então dá para usar
     /// `noteNumberOfRowsChanged` (barato) em vez de `reloadData`.
     var isStreaming: Bool = false
+    /// Aparência vinda das preferências (ver `gridStyle(rowHeight:zebra:)`).
+    var rowHeight: CGFloat = Theme.rowHeight
+    var zebra: Bool = true
     @Binding var selectedCell: EditCoord?
     @Binding var selectedRow: Int?
     var sortColumn: String? = nil
@@ -97,6 +100,14 @@ struct DataGridView: NSViewRepresentable {
         return stride(from: 0, to: count, by: count / limit)
     }
 
+    /// Fora do init memberwise para os call sites existentes não mudarem.
+    func gridStyle(rowHeight: CGFloat, zebra: Bool) -> DataGridView {
+        var copy = self
+        copy.rowHeight = rowHeight
+        copy.zebra = zebra
+        return copy
+    }
+
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
     }
@@ -108,11 +119,13 @@ struct DataGridView: NSViewRepresentable {
         tableView.gridCoordinator = coordinator
         tableView.dataSource = coordinator
         tableView.delegate = coordinator
-        tableView.usesAlternatingRowBackgroundColors = true
+        tableView.usesAlternatingRowBackgroundColors = zebra
+        coordinator.zebraSnapshot = zebra
         tableView.gridStyleMask = [.solidVerticalGridLineMask, .solidHorizontalGridLineMask]
         tableView.gridColor = NSColor(Theme.gridLine)
         tableView.intercellSpacing = .zero
-        tableView.rowHeight = Theme.rowHeight
+        tableView.rowHeight = rowHeight
+        coordinator.rowHeightSnapshot = rowHeight
         tableView.allowsColumnReordering = false
         tableView.allowsColumnResizing = true
         tableView.columnAutoresizingStyle = .noColumnAutoresizing
@@ -201,6 +214,22 @@ struct DataGridView: NSViewRepresentable {
         coordinator.newRowIndexSnapshot = newRowIndex
         coordinator.editableSnapshot = editable
         coordinator.deferredColumnsSnapshot = deferredColumns
+
+        // Preferências de aparência do grid. A altura muda a geometria de todas as
+        // linhas: aborta uma edição em curso (o field editor ficaria no lugar errado) e
+        // recarrega — ANTES do bloco que consome `pendingEdit`, para a próxima edição
+        // nascer já na altura nova.
+        if rowHeight != coordinator.rowHeightSnapshot {
+            coordinator.rowHeightSnapshot = rowHeight
+            if tableView.editedRow >= 0 { coordinator.cancelActiveEditing() }
+            tableView.rowHeight = rowHeight
+            tableView.reloadData()
+        }
+        if zebra != coordinator.zebraSnapshot {
+            coordinator.zebraSnapshot = zebra
+            tableView.usesAlternatingRowBackgroundColors = zebra
+            tableView.needsDisplay = true
+        }
 
         // Dados trocando sob uma edição em curso (ex.: loadPage assíncrono): aborta a
         // edição sem commit — os dados novos têm precedência. Os fluxos síncronos
@@ -301,6 +330,8 @@ struct DataGridView: NSViewRepresentable {
         /// Edição agendada para DEPOIS do próximo updateNSView (Tab que commitou, ou
         /// célula truncada aguardando o valor íntegro).
         var pendingEdit: EditCoord?
+        var rowHeightSnapshot: CGFloat = Theme.rowHeight
+        var zebraSnapshot = true
 
         /// As larguras já foram calculadas com linhas de verdade.
         var hasSeededWidths = false

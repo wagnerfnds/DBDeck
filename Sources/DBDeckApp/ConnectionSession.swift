@@ -85,12 +85,13 @@ final class ConnectionSession {
         self.connectionID = connectionID
     }
 
-    func recordQuery(_ sql: String) {
+    func recordQuery(_ sql: String, limit: Int = 30) {
         let trimmed = sql.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         queryHistory.removeAll { $0 == trimmed }
         queryHistory.insert(trimmed, at: 0)
-        if queryHistory.count > 30 { queryHistory.removeLast() }
+        // `while`, não `if`: reduzir o limite nas preferências apara o excesso acumulado.
+        while queryHistory.count > max(1, limit) { queryHistory.removeLast() }
     }
 
     // MARK: - Catálogo do autocomplete

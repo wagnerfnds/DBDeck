@@ -188,4 +188,9 @@ final class PageQueryTests: XCTestCase {
             "SELECT * FROM \"pedidos\" WHERE \"id\" > 3 ORDER BY \"id\" ASC LIMIT 1000"
         )
     }
+
+    func testPageSizePersonalizado() {
+        let builder = PageQueryBuilder(engine: .sqlite, table: "t", pageSize: 100)
+        XCTAssertTrue(builder.make(cursor: .absolute(0)).sql.hasSuffix("LIMIT 100"))
+    }
 }

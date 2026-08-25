@@ -2,6 +2,7 @@ import SwiftUI
 import DBDeckCore
 
 struct SQLConsoleView: View {
+    @Environment(AppSettings.self) private var settings
     let driver: any DatabaseDriver
     let tab: EditorTab
     let session: ConnectionSession
@@ -305,7 +306,7 @@ struct SQLConsoleView: View {
 
         for (index, statement) in statements.enumerated() {
             if token.isCancelled { break }
-            session.recordQuery(statement.sql)
+            session.recordQuery(statement.sql, limit: settings.historyLimit)
             do {
                 if driver.isSelectStatement(statement.sql) {
                     let statementSQL = statement.sql
@@ -433,6 +434,7 @@ struct SQLConsoleView: View {
             onSort: nil,
             onSetValue: nil
         )
+        .gridStyle(rowHeight: settings.rowHeight, zebra: settings.zebraStripes)
         .background(Color(nsColor: .textBackgroundColor))
     }
 
