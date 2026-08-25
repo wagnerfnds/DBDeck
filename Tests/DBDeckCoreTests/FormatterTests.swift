@@ -118,6 +118,17 @@ final class FormatterTests: XCTestCase {
         XCTAssertEqual(saida, "select a\nfrom t\nwhere x = 1")
     }
 
+    func testDistinctDentroDeFuncaoNaoQuebraLinha() {
+        // O DISTINCT de `SELECT DISTINCT` fica na mesma linha da cláusula; o de
+        // `count(distinct …)` é só um argumento e não pode abrir a lista.
+        XCTAssertEqual(
+            f("select count(distinct p.cliente_id), sum(p.total) from pedidos p"),
+            "SELECT\n    count(DISTINCT p.cliente_id),\n    sum(p.total)\nFROM pedidos p")
+        XCTAssertEqual(
+            f("select distinct a, b from t"),
+            "SELECT DISTINCT\n    a,\n    b\nFROM t")
+    }
+
     func testCastEOperadoresCompostos() {
         XCTAssertEqual(f("select a::text, b <> c, d || e from t"), "SELECT\n    a::text,\n    b <> c,\n    d || e\nFROM t")
     }

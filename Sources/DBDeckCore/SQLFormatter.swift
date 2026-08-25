@@ -447,7 +447,8 @@ public enum SQLFormatter {
                 } else {
                     write(text, spaceBefore: true)
                 }
-            case "DISTINCT", "ALL" where previous.map { SQLFormatter.listClauses.contains($0.upper) } ?? false:
+            case "DISTINCT" where previous.map({ SQLFormatter.listClauses.contains($0.upper) }) ?? false,
+                 "ALL" where previous.map({ SQLFormatter.listClauses.contains($0.upper) }) ?? false:
                 write(text, spaceBefore: true)
                 if listMode { newline(at: indent + 1) }
             default:
