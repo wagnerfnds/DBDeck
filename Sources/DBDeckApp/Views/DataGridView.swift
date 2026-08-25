@@ -132,6 +132,19 @@ struct DataGridView: NSViewRepresentable {
         menu.delegate = coordinator
         tableView.menu = menu
 
+        // O scroll view entra ANTES de colunas e dados. Sem clip view, o AppKit toma a
+        // tabela inteira como "visível" e o primeiro beginUpdates cria uma row view por
+        // linha — com um resultado de centenas de milhares de linhas isso é minutos de
+        // main thread e gigabytes. Dentro do clip (ainda sem tamanho) nada é visível.
+        let scrollView = NSScrollView()
+        scrollView.documentView = tableView
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = .textBackgroundColor
+
         coordinator.columnsSnapshot = columns
         coordinator.rowsSnapshot = rows
         coordinator.rowNumberStartSnapshot = rowNumberStart
@@ -143,15 +156,6 @@ struct DataGridView: NSViewRepresentable {
         coordinator.rebuildColumns(on: tableView)
         coordinator.applySortIndicators(on: tableView)
         tableView.reloadData()
-
-        let scrollView = NSScrollView()
-        scrollView.documentView = tableView
-        scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = true
-        scrollView.autohidesScrollers = true
-        scrollView.borderType = .noBorder
-        scrollView.drawsBackground = true
-        scrollView.backgroundColor = .textBackgroundColor
         return scrollView
     }
 

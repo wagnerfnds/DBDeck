@@ -761,17 +761,17 @@ public enum SQLDump {
                 let (text, leftover) = decodeUTF8Prefix(pending)
                 pending = leftover
                 for statement in splitter.feed(text) {
-                    try await run(statement, driver: driver, count: &count, errors: &errors, consecutive: &consecutive)
+                    try await run(statement.sql, driver: driver, count: &count, errors: &errors, consecutive: &consecutive)
                 }
                 progress(count, bytesRead, errors.count)
             }
             if !pending.isEmpty, let tail = String(data: pending, encoding: .utf8) {
                 for statement in splitter.feed(tail) {
-                    try await run(statement, driver: driver, count: &count, errors: &errors, consecutive: &consecutive)
+                    try await run(statement.sql, driver: driver, count: &count, errors: &errors, consecutive: &consecutive)
                 }
             }
             for statement in splitter.finish() {
-                try await run(statement, driver: driver, count: &count, errors: &errors, consecutive: &consecutive)
+                try await run(statement.sql, driver: driver, count: &count, errors: &errors, consecutive: &consecutive)
             }
         } catch {
             // Aborto (erros em série ou cancelamento): restaura a sessão antes de sair —
@@ -795,7 +795,7 @@ public enum SQLDump {
         let splitter = StatementSplitter()
         do {
             for statement in splitter.feed(sql) + splitter.finish() {
-                try await run(statement, driver: driver, count: &count, errors: &errors, consecutive: &consecutive)
+                try await run(statement.sql, driver: driver, count: &count, errors: &errors, consecutive: &consecutive)
             }
         } catch {
             if driver.engine == .mysql { _ = try? await driver.execute("COMMIT") }
@@ -900,8 +900,40 @@ public enum SQLDump {
 
     /// Divide SQL em statements respeitando aspas simples, duplas, crases e comentários.
     public static func splitStatements(_ sql: String) -> [String] {
+        statements(in: sql).map(\.sql)
+    }
+
+    /// Igual ao `splitStatements`, mas preservando onde cada statement está no texto —
+    /// o console usa a faixa para achar o comando sob o cursor e para apontar o que falhou.
+    public static func statements(in sql: String) -> [SQLStatement] {
         let splitter = StatementSplitter()
         return splitter.feed(sql) + splitter.finish()
+    }
+}
+
+/// Um statement com a faixa que ele ocupa no texto original.
+///
+/// A faixa vem em unidades UTF-16 (a mesma medida do `NSRange` do `NSTextView`), então o
+/// console consegue casar o cursor com o statement sob ele sem reconverter índices — e
+/// consegue apontar exatamente qual comando de um script falhou.
+public struct SQLStatement: Sendable, Equatable {
+    /// SQL já sem os brancos das pontas e sem o delimitador.
+    public let sql: String
+    public let location: Int
+    public let length: Int
+
+    public init(sql: String, location: Int, length: Int) {
+        self.sql = sql
+        self.location = location
+        self.length = length
+    }
+
+    public var endLocation: Int { location + length }
+
+    /// `true` quando o cursor está dentro do statement — inclusive encostado nas pontas,
+    /// que é onde o cursor fica depois de digitar o comando.
+    public func contains(_ offset: Int) -> Bool {
+        offset >= location && offset <= endLocation
     }
 }
 
@@ -938,27 +970,46 @@ public final class StatementSplitter {
     /// Rótulo em formação entre o primeiro `$` e o segundo (`$body$` → "body").
     /// `nil` fora de um rótulo; `""` logo depois do `$` de abertura.
     private var pendingDollarTag: String?
+    /// Posição UTF-16 do caractere sendo consumido. Mantida entre chunks: um arquivo
+    /// lido em pedaços continua produzindo faixas relativas ao texto inteiro.
+    private var position = 0
+    /// Onde o statement corrente começou (antes de aparar os brancos). Aparar por
+    /// caractere custaria um teste de whitespace por byte do dump; medir só na emissão
+    /// é O(statement) uma vez, não O(arquivo).
+    private var rawStart: Int?
 
     public init() {}
 
-    public func feed(_ text: String) -> [String] {
-        var statements: [String] = []
+    public func feed(_ text: String) -> [SQLStatement] {
+        var statements: [SQLStatement] = []
         for character in text {
             consume(character, into: &statements)
+            position += character.utf16.count
         }
         return statements
     }
 
-    public func finish() -> [String] {
-        var statements: [String] = []
+    public func finish() -> [SQLStatement] {
+        var statements: [SQLStatement] = []
         releaseMatched()
-        let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
-        current = ""
-        if !trimmed.isEmpty { statements.append(trimmed) }
+        emit(into: &statements)
         return statements
     }
 
-    private func consume(_ character: Character, into statements: inout [String]) {
+    /// Fecha o statement acumulado e o publica com a faixa que ocupa no texto original.
+    private func emit(into statements: inout [SQLStatement]) {
+        let raw = current
+        let start = rawStart
+        current = ""
+        rawStart = nil
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let start else { return }
+        // Quanto do começo era branco — o que separa `rawStart` do primeiro caractere real.
+        let leading = raw.utf16.count - raw.drop(while: { $0.isWhitespace }).utf16.count
+        statements.append(SQLStatement(sql: trimmed, location: start + leading, length: trimmed.utf16.count))
+    }
+
+    private func consume(_ character: Character, into statements: inout [SQLStatement]) {
         if lineComment {
             append(character)
             if character == "\n" { lineComment = false }
@@ -1040,9 +1091,7 @@ public final class StatementSplitter {
             if matched == delimiter.count {
                 matched = 0
                 lineBuffer = ""
-                let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
-                current = ""
-                if !trimmed.isEmpty { statements.append(trimmed) }
+                emit(into: &statements)
             }
             // Os caracteres do delimitador nunca entram no statement.
             return
@@ -1092,6 +1141,8 @@ public final class StatementSplitter {
     }
 
     private func append(_ character: Character) {
+        // Primeiro caractere depois do delimitador anterior: aqui começa o statement.
+        if current.isEmpty { rawStart = position }
         current.append(character)
         // Uma diretiva DELIMITER é curta; passando disso a linha não é uma.
         if lineBuffer.count < 64 { lineBuffer.append(character) }
@@ -1100,7 +1151,15 @@ public final class StatementSplitter {
     /// Devolve ao statement os caracteres segurados por um casamento parcial do delimitador.
     private func releaseMatched() {
         guard matched > 0 else { return }
-        for index in 0..<matched { append(delimiter[index]) }
+        // Os caracteres segurados terminam no caractere corrente: devolvê-los com a
+        // posição de agora deslocaria a faixa do statement pelo tamanho do delimitador.
+        let base = position - matched
+        let current = position
+        for index in 0..<matched {
+            position = base + index
+            append(delimiter[index])
+        }
+        position = current
         matched = 0
     }
 }

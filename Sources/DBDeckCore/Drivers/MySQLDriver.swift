@@ -12,6 +12,9 @@ public final class MySQLDriver: DatabaseDriver, @unchecked Sendable {
     private var connection: MySQLConnection?
     private var eventLoopGroup: MultiThreadedEventLoopGroup?
     private let lock = OSAllocatedUnfairLock(initialState: false)
+    /// `CONNECTION_ID()` desta sessão — o alvo do `KILL QUERY`. Lido fora do lock de
+    /// propósito: o cancelamento chega enquanto a conexão está ocupada com a consulta.
+    private let serverConnectionID = OSAllocatedUnfairLock<UInt64?>(initialState: nil)
 
     public init(config: ConnectionConfig) {
         self.config = config
@@ -51,6 +54,23 @@ public final class MySQLDriver: DatabaseDriver, @unchecked Sendable {
             try? await group.shutdownGracefully()
             throw error
         }
+        // Só informativo: sem o id o cancelamento vira no-op, não um erro de conexão.
+        if let row = try? await query("SELECT CONNECTION_ID()").rows.first?.first,
+           case .int(let id) = row {
+            serverConnectionID.withLock { $0 = UInt64(id) }
+        }
+    }
+
+    /// `KILL QUERY` é o único jeito de abortar um statement no MySQL — e tem que vir de
+    /// OUTRA conexão, porque esta está bloqueada servindo o resultado. A conexão auxiliar
+    /// vive só o tempo do comando. A consulta interrompida termina com o erro 1317 do
+    /// servidor, que o chamador trata como cancelamento.
+    public func cancelRunningQuery() async {
+        guard let id = serverConnectionID.withLock({ $0 }) else { return }
+        let helper = MySQLDriver(config: config)
+        guard (try? await helper.connect()) != nil else { return }
+        _ = try? await helper.execute("KILL QUERY \(id)")
+        await helper.disconnect()
     }
 
     public func disconnect() async {

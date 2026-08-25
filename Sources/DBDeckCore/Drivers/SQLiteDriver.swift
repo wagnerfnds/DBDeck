@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import os
 
 public final class SQLiteDriver: DatabaseDriver, @unchecked Sendable {
     public let engine: SQLEngine = .sqlite
@@ -7,6 +8,10 @@ public final class SQLiteDriver: DatabaseDriver, @unchecked Sendable {
     private let config: ConnectionConfig
     private let queue = DispatchQueue(label: "dbdeck.sqlite.\(UUID().uuidString)")
     private var db: OpaquePointer?
+    /// Cópia do handle para `sqlite3_interrupt`, fora da fila: a fila está ocupada com a
+    /// própria consulta que se quer interromper, e `queue.sync` esperaria ela acabar.
+    /// Guardado como inteiro porque OpaquePointer não é Sendable.
+    private let interruptHandle = OSAllocatedUnfairLock<UInt>(initialState: 0)
 
     public init(config: ConnectionConfig) {
         self.config = config
@@ -30,16 +35,27 @@ public final class SQLiteDriver: DatabaseDriver, @unchecked Sendable {
         }
         sqlite3_busy_timeout(handle, 5000)
         queue.sync { db = handle }
+        let rawHandle = UInt(bitPattern: handle)
+        interruptHandle.withLock { $0 = rawHandle }
         _ = try? await execute("PRAGMA foreign_keys = ON")
     }
 
     public func disconnect() async {
+        interruptHandle.withLock { $0 = 0 }
         queue.sync {
             if let db {
                 sqlite3_close(db)
             }
             db = nil
         }
+    }
+
+    /// `sqlite3_interrupt` é seguro de chamar de qualquer thread enquanto o handle está
+    /// aberto: o `step` em curso devolve SQLITE_INTERRUPT e a consulta acaba ali.
+    public func cancelRunningQuery() async {
+        let raw = interruptHandle.withLock { $0 }
+        guard raw != 0, let handle = OpaquePointer(bitPattern: raw) else { return }
+        sqlite3_interrupt(handle)
     }
 
     public func databases() async throws -> [String] {
@@ -121,7 +137,16 @@ public final class SQLiteDriver: DatabaseDriver, @unchecked Sendable {
         defer { sqlite3_finalize(statement) }
         var columns: [String] = []
         var rows: [[SQLValue]] = []
-        while sqlite3_step(statement) == SQLITE_ROW {
+        while true {
+            let code = sqlite3_step(statement)
+            guard code == SQLITE_ROW else {
+                // Sair do laço em QUALQUER código devolvia linhas parciais como sucesso:
+                // um SQLITE_INTERRUPT (cancelamento), BUSY ou CORRUPT no meio do
+                // resultado passava batido — o cancel do console "terminava" a consulta
+                // em vez de cancelá-la.
+                if code != SQLITE_DONE { throw DriverError.queryFailed(lastError(db)) }
+                break
+            }
             let count = sqlite3_column_count(statement)
             if columns.isEmpty {
                 columns = (0..<count).map { String(cString: sqlite3_column_name(statement, Int32($0))) }

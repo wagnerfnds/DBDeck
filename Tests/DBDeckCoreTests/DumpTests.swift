@@ -104,7 +104,56 @@ final class DumpTests: XCTestCase {
         statements += splitter.feed(" END $$; SELECT 1;")
         statements += splitter.finish()
         XCTAssertEqual(statements.count, 2)
-        XCTAssertTrue(statements[0].contains("RAISE NOTICE 'a; b';"))
+        XCTAssertTrue(statements[0].sql.contains("RAISE NOTICE 'a; b';"))
+    }
+
+    // MARK: - Faixas dos statements
+
+    func testFaixaDoStatementRecortaOTextoOriginal() {
+        let sql = "SELECT 1;\n\n  UPDATE t SET a = 2;  \nDELETE FROM t;"
+        let statements = SQLDump.statements(in: sql)
+        XCTAssertEqual(statements.count, 3)
+        // A faixa tem que recortar exatamente o statement — é ela que o console usa
+        // para destacar/reexecutar o comando sob o cursor.
+        let text = sql as NSString
+        for statement in statements {
+            XCTAssertEqual(text.substring(with: NSRange(location: statement.location, length: statement.length)), statement.sql)
+        }
+        XCTAssertEqual(statements[1].sql, "UPDATE t SET a = 2")
+    }
+
+    func testFaixaEmUTF16AcompanhaTextoMultibyte() {
+        // O NSTextView mede em UTF-16: contar Characters deslocaria a faixa em qualquer
+        // consulta com acento ou emoji, e o console recortaria o statement errado.
+        let sql = "SELECT 'ação 🇧🇷';\nSELECT 2;"
+        let statements = SQLDump.statements(in: sql)
+        XCTAssertEqual(statements.count, 2)
+        let text = sql as NSString
+        XCTAssertEqual(
+            text.substring(with: NSRange(location: statements[1].location, length: statements[1].length)),
+            "SELECT 2"
+        )
+    }
+
+    func testStatementSobOCursor() {
+        let sql = "SELECT 1;\nSELECT 2;"
+        let statements = SQLDump.statements(in: sql)
+        // Cursor encostado no fim do primeiro comando (onde ele fica ao acabar de digitar).
+        XCTAssertTrue(statements[0].contains(8))
+        XCTAssertFalse(statements[1].contains(8))
+        XCTAssertTrue(statements[1].contains(12))
+    }
+
+    func testFaixaIncrementalUsaPosicaoAbsolutaDoTextoInteiro() {
+        let splitter = StatementSplitter()
+        var statements = splitter.feed("SELECT 1; SEL")
+        statements += splitter.feed("ECT 2;")
+        statements += splitter.finish()
+        XCTAssertEqual(statements.count, 2)
+        // O segundo statement começa depois do primeiro chunk: a posição não pode
+        // reiniciar a cada pedaço lido do arquivo.
+        XCTAssertEqual(statements[1].location, 10)
+        XCTAssertEqual(statements[1].sql, "SELECT 2")
     }
 
     func testSplitterNaoFechaComentarioDeBlocoCedo() {
@@ -120,7 +169,7 @@ final class DumpTests: XCTestCase {
         statements += splitter.feed("c'; SELECT 2;")
         statements += splitter.finish()
         XCTAssertEqual(statements.count, 2)
-        XCTAssertTrue(statements[0].contains("'a;bc'"))
+        XCTAssertTrue(statements[0].sql.contains("'a;bc'"))
     }
 
     func testRemoveDefiner() {
