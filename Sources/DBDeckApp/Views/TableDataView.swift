@@ -47,6 +47,11 @@ struct TableDataView: View {
     @State private var primaryKeys: [String] = []
     @State private var rows: [[SQLValue]] = []
     @State private var original: [[SQLValue]] = []
+    /// Alvo das entradas de undo no UndoManager da janela — precisa ser um objeto, e a
+    /// View é struct. Ligar ao UndoManager (e não a uma pilha própria) é o que faz
+    /// Editar › Desfazer/Refazer e ⌘Z/⌘⇧Z funcionarem como em qualquer app do Mac.
+    @State private var editHistory = CellEditHistory()
+    @Environment(\.undoManager) private var undoManager
     @State private var offset = 0
     @State private var totalCount: Int?
     /// Total vindo das estatísticas do engine (mostrado com "~"): abrir uma tabela de
@@ -99,6 +104,37 @@ struct TableDataView: View {
     private let streamBatchSize = 100
 
     private var hasPendingChanges: Bool { rows != original }
+
+    // MARK: - Edição de célula com undo
+
+    /// Toda edição de célula passa aqui: grava o valor e registra o inverso no UndoManager.
+    /// O undo chama de volta com o valor antigo, que registra o redo — a pilha se monta sozinha.
+    private func setCell(row: Int, col: Int, value: SQLValue) {
+        guard row < rows.count, col < rows[row].count else { return }
+        let previous = rows[row][col]
+        guard previous != value else { return }
+        rows[row][col] = value
+        guard let undoManager else { return }
+        undoManager.registerUndo(withTarget: editHistory) { history in
+            history.apply?(row, col, previous)
+        }
+        undoManager.setActionName("Edição de célula")
+    }
+
+    /// Volta ao que veio do servidor: alterações de células e a linha nova em criação.
+    private func discardChanges() {
+        commitActiveCellEdit()
+        rows = original
+        isNewRow = false
+        if let selectedRow, selectedRow >= rows.count { self.selectedRow = rows.count - 1 >= 0 ? rows.count - 1 : nil }
+        clearUndoHistory()
+    }
+
+    /// As entradas de undo apontam para índices de linha desta página: recarregar,
+    /// salvar ou descartar as invalida.
+    private func clearUndoHistory() {
+        undoManager?.removeAllActions(withTarget: editHistory)
+    }
 
     private var selectedRowBinding: Binding<[SQLValue]>? {
         guard let selectedRow, selectedRow < rows.count else { return nil }
@@ -158,7 +194,10 @@ struct TableDataView: View {
             Divider()
             bottomBar
         }
-        .task { await load() }
+        .task {
+            editHistory.apply = { row, col, value in setCell(row: row, col: col, value: value) }
+            await load()
+        }
         .onChange(of: tab?.reloadRequest) { _, _ in
             runGuarded { reloadCurrentPage() }
         }
@@ -329,10 +368,7 @@ struct TableDataView: View {
             sortColumn: sortColumn,
             sortAscending: sortAscending,
             onSort: { toggleSort($0) },
-            onSetValue: { row, col, value in
-                guard row < rows.count, col < rows[row].count else { return }
-                rows[row][col] = value
-            },
+            onSetValue: { row, col, value in setCell(row: row, col: col, value: value) },
             onCopyRowAsInsert: { row in Task { await copyRowAsInsert(row) } },
             // O grid só edita valores íntegros: ao abrir a edição de uma célula cortada
             // (ou de coluna adiada) ele pede o valor real e reabre a edição quando chega.
@@ -437,6 +473,10 @@ struct TableDataView: View {
                     Text("alterações não salvas")
                         .font(.caption)
                         .foregroundStyle(.orange)
+                    Button("Descartar") { discardChanges() }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                        .help("Volta ao que está no servidor, sem gravar nada")
                 }
             }
 
@@ -752,6 +792,7 @@ struct TableDataView: View {
                       ContinuousClock.now >= nextPublish else { continue }
                 rows = accumulated
                 original = accumulated
+                clearUndoHistory()
                 self.offset = cursor.offset
                 deferredColumns = deferred
                 intermediatePublishes += 1
@@ -775,6 +816,7 @@ struct TableDataView: View {
             guard loadGeneration == generation else { return }
             rows = accumulated
             original = accumulated
+            clearUndoHistory()
             self.offset = cursor.offset
             deferredColumns = deferred
             if recount { await refreshCount(loadedRows: accumulated.count) }
@@ -1196,3 +1238,9 @@ struct TableDataView: View {
     }
 }
 
+
+/// Ver `TableDataView.editHistory`.
+@MainActor
+final class CellEditHistory: NSObject {
+    var apply: ((_ row: Int, _ col: Int, _ value: SQLValue) -> Void)?
+}
