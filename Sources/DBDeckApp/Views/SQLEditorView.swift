@@ -49,6 +49,11 @@ final class EditorSelectionState {
     func dismissCompletions() {
         textView?.dismissCompletions(suppress: false)
     }
+
+    /// Formata a seleção ou o texto inteiro (botão do console; o atalho é ⇧⌥F).
+    func formatSQL() {
+        textView?.formatSQL()
+    }
 }
 
 /// Editor de SQL: `SQLTextView` (teclado, autocomplete, indentação) dentro de um scroll
