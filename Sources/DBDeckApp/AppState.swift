@@ -163,6 +163,9 @@ final class AppState {
     func liveConfig(for connectionID: UUID) -> ConnectionConfig? {
         guard var config = config(for: connectionID) else { return nil }
         config.password = KeychainManager.password(for: config.id) ?? ""
+        #if os(iOS)
+        config.sqlitePath = SQLiteFileStore.resolve(config.sqlitePath)
+        #endif
         return config
     }
 

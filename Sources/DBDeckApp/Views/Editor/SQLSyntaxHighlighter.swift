@@ -1,4 +1,8 @@
+#if os(macOS)
 import AppKit
+#else
+import UIKit
+#endif
 
 /// Highlight de SQL por regex — keywords, strings, números e comentários, nas cores do
 /// `Theme` (dinâmicas: acompanham claro/escuro).
@@ -7,7 +11,7 @@ import AppKit
 /// então é imperceptível. Scripts de MBs colados são o caso em que um highlight
 /// incremental passaria a valer — anotado como trabalho futuro.
 enum SQLSyntaxHighlighter {
-    static func font(size: CGFloat) -> NSFont {
+    static func font(size: CGFloat) -> PlatformFont {
         Theme.codeFont(size: size)
     }
 
@@ -52,7 +56,7 @@ enum SQLSyntaxHighlighter {
         storage.beginEditing()
         storage.setAttributes([
             .font: font(size: fontSize),
-            .foregroundColor: NSColor.labelColor,
+            .foregroundColor: Theme.syntaxPlain,
         ], range: range)
 
         // Ordem importa: o que vem depois vence — uma keyword dentro de string fica
@@ -73,7 +77,7 @@ enum SQLSyntaxHighlighter {
 
     private static func apply(
         _ regex: NSRegularExpression,
-        color: NSColor,
+        color: PlatformColor,
         in text: NSString,
         range: NSRange,
         storage: NSTextStorage

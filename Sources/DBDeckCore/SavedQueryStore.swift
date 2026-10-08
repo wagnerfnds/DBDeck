@@ -18,7 +18,7 @@ public struct SavedQuery: Codable, Identifiable, Sendable, Equatable {
 public enum SavedQueryStore {
     public static var fileURL: URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Application Support")
+            ?? URL.applicationSupportDirectory
         return support.appending(path: "DBDeck/saved-queries.json")
     }
 
