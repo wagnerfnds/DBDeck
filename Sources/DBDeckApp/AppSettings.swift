@@ -1,4 +1,8 @@
+#if os(macOS)
 import AppKit
+#else
+import UIKit
+#endif
 import Foundation
 import Observation
 import DBDeckCore
@@ -31,7 +35,7 @@ enum RowDensity: String, CaseIterable, Identifiable {
     var height: CGFloat {
         switch self {
         case .compact: Theme.rowHeight
-        case .normal: 24
+        case .normal: Theme.rowHeightNormal
         }
     }
 }
@@ -104,7 +108,12 @@ final class AppSettings {
 
     // MARK: Padrões
 
+    #if os(macOS)
     static let defaultFontSize = 13.0
+    #else
+    /// Tela menor, mas lida mais perto e sem zoom de ponteiro: 13 pt cansa no iPhone.
+    static let defaultFontSize = 15.0
+    #endif
     static let fontSizeRange = 9.0...24.0
     static let pageSizeChoices = [100, 500, 1000, 5000]
     static let previewLimitChoices = [128, 256, 1024, 4096]
@@ -166,6 +175,7 @@ final class AppSettings {
     /// e o painel do autocomplete, a barra de busca e os menus do grid são AppKit — herdam
     /// do app. As cores do Theme são semânticas e acompanham sozinhas.
     func applyAppearance() {
+        #if os(macOS)
         // `NSApplication.shared`, não `NSApp`: no `init` do App o SwiftUI ainda não criou
         // a aplicação e `NSApp` é nil (crash na primeira abertura). `shared` cria se preciso.
         let app = NSApplication.shared
@@ -174,5 +184,19 @@ final class AppSettings {
         case .light: app.appearance = NSAppearance(named: .aqua)
         case .dark: app.appearance = NSAppearance(named: .darkAqua)
         }
+        #else
+        // No iOS o equivalente é o estilo da janela: vale também para os UIKit embutidos
+        // (grid, editor) e para alertas e menus, que não herdam `.preferredColorScheme`.
+        let style: UIUserInterfaceStyle
+        switch appearance {
+        case .system: style = .unspecified
+        case .light: style = .light
+        case .dark: style = .dark
+        }
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            for window in windowScene.windows { window.overrideUserInterfaceStyle = style }
+        }
+        #endif
     }
 }

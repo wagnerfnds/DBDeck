@@ -76,7 +76,11 @@ public enum SSHTunnelError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .sshUnavailable:
+            #if os(macOS)
             return "O executável /usr/bin/ssh não foi encontrado."
+            #else
+            return "Túnel SSH ainda não é suportado no iOS."
+            #endif
         case .failed(let detail):
             return detail.isEmpty ? "Não foi possível abrir o túnel SSH." : "Túnel SSH: \(detail)"
         case .timedOut:
@@ -84,6 +88,8 @@ public enum SSHTunnelError: LocalizedError {
         }
     }
 }
+
+#if os(macOS)
 
 // MARK: - Túnel
 
@@ -447,3 +453,30 @@ final class AskpassChannel: @unchecked Sendable {
         try? FileManager.default.removeItem(at: directory)
     }
 }
+
+#else
+
+/// No iOS não há `Process` nem `/usr/bin/ssh`: o túnel não tem como ser tocado pelo
+/// binário do sistema. Mantém a mesma superfície para o resto do core compilar, e falha
+/// com mensagem clara se uma conexão com SSH for aberta.
+public final class SSHTunnel: @unchecked Sendable {
+    public let localPort: Int
+
+    private init(localPort: Int) { self.localPort = localPort }
+
+    public static func open(
+        config: SSHConfig,
+        remoteHost: String,
+        remotePort: Int,
+        secret: String?,
+        timeout: TimeInterval = 20
+    ) async throws -> SSHTunnel {
+        throw SSHTunnelError.sshUnavailable
+    }
+
+    public func close() {}
+
+    public var isRunning: Bool { false }
+}
+
+#endif

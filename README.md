@@ -52,10 +52,43 @@ Or build, install to `/Applications` and launch in one step:
 ./install.sh
 ```
 
+## iOS / iPadOS
+
+The same core (drivers, keyset pagination, streaming, formatter, autocomplete) also ships
+as a native iPhone and iPad app (`DBDeckMobile` target, iOS 17+). The interface is built
+for touch:
+
+- **Data grid** on `UICollectionView` with a spreadsheet layout — only visible cells exist,
+  header and row numbers stay pinned, and the next page loads as you scroll (anchored on
+  the primary key, so page 50 costs the same as page 1)
+- **Tap a cell** to open the whole row as a form (edit, set NULL, follow foreign keys, step
+  through rows); **touch and hold** for copy / copy as INSERT / filter by this value
+- **Filters** as removable chips, **pull to refresh**, sort by tapping a header
+- **SQL console** with syntax highlighting, autocomplete suggestions and SQL keys above the
+  keyboard, run selection / statement under cursor, cancel, history and saved queries
+- Structure editing, relations, triggers and DDL; CSV/JSON/SQL export and dumps through
+  the share sheet
+- SQLite files are imported from the Files app (they live in *On My iPhone › DBDeck*)
+- On iPad, a three-column layout (connections › tables › content) with keyboard shortcuts
+
+SSH tunnels rely on the system `ssh` and are macOS only for now.
+
+```sh
+./install-ios.sh                    # build and run on a simulator
+./install-ios.sh device <TEAM_ID>   # build, sign and install on a connected device
+```
+
 ## Tests
 
 ```sh
 swift test
+```
+
+UI tests drive the iOS app through its main flows (they expect a SQLite connection named
+"Loja (demo)"):
+
+```sh
+xcodebuild test -project DBDeck.xcodeproj -scheme DBDeckMobile -destination 'platform=iOS Simulator,name=iPhone 17'
 ```
 
 Postgres integration tests are opt-in and run against a live server:
