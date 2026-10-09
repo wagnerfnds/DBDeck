@@ -120,17 +120,46 @@ final class TourTests: XCTestCase {
     }
 
     func testPostgres() throws {
+        // Conexão sem banco fixo: abre o seletor de bancos, sem alerta de erro.
         app.staticTexts["Postgres local"].tap()
+        let postgres = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'postgres'")).firstMatch
+        XCTAssertTrue(postgres.waitForExistence(timeout: 15))
+        XCTAssertFalse(app.alerts.firstMatch.exists, "conectar sem banco não deveria mostrar erro")
+        shot("40-postgres-escolher-banco")
+
+        let search = app.searchFields["Buscar banco"]
+        search.tap()
+        search.typeText("post")
+        shot("41-postgres-busca-banco")
+        postgres.tap()
+
         let console = app.staticTexts["Console SQL"]
         XCTAssertTrue(console.waitForExistence(timeout: 15))
-        shot("40-postgres-tabelas")
         console.tap()
         let editor = app.textViews["Editor SQL"]
         editor.tap()
         editor.typeText("SELECT datname, pg_database_size(datname) AS bytes FROM pg_database ORDER BY 2 DESC;")
         app.buttons["Executar"].firstMatch.tap()
         sleep(2)
-        shot("41-postgres-console")
+        shot("42-postgres-console")
         XCTAssertTrue(app.staticTexts["datname"].exists)
+    }
+
+    func testMySQLWithoutDatabase() throws {
+        app.staticTexts["MySQL local"].tap()
+        let sys = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'sys'")).firstMatch
+        XCTAssertTrue(sys.waitForExistence(timeout: 15))
+        sleep(1)
+        XCTAssertFalse(app.alerts.firstMatch.exists, "MySQL sem banco não deveria gritar 'No database selected'")
+        shot("50-mysql-sem-banco")
+        sys.tap()
+        XCTAssertTrue(app.staticTexts["Console SQL"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.alerts.firstMatch.exists)
+        shot("51-mysql-tabelas")
+
+        // Troca de banco pelo título: folha com busca.
+        app.buttons.matching(NSPredicate(format: "label CONTAINS 'Banco ativo'")).firstMatch.tap()
+        XCTAssertTrue(app.searchFields["Buscar banco"].waitForExistence(timeout: 5))
+        shot("52-mysql-trocar-banco")
     }
 }

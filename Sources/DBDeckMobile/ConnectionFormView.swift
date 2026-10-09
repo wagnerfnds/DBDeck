@@ -14,6 +14,7 @@ struct ConnectionFormView: View {
     @State private var testing = false
     @State private var testResult: TestOutcome?
     @State private var databases: [String] = []
+    @State private var pickingDatabase = false
     @State private var loadingDatabases = false
     @State private var showImporter = false
     @State private var showNewFile = false
@@ -138,6 +139,21 @@ struct ConnectionFormView: View {
             Text("O arquivo fica em Arquivos › No meu iPhone › DBDeck › Databases.")
         }
         .errorAlert($fileError)
+        .navigationDestination(isPresented: $pickingDatabase) {
+            DatabaseList(
+                databases: databases,
+                current: config.database.isEmpty ? nil : config.database,
+                recents: RecentDatabases.list(for: config.id),
+                engine: config.engine,
+                onPick: { name in
+                    config.database = name
+                    pickingDatabase = false
+                },
+                onRefresh: { await loadDatabases() }
+            )
+            .navigationTitle("Banco padrão")
+            .navigationBarTitleDisplayMode(.inline)
+        }
         .onAppear {
             if isNew, config.engine != settings.defaultEngine, config.host == "localhost" {
                 config.engine = settings.defaultEngine
@@ -277,13 +293,16 @@ struct ConnectionFormView: View {
                     .submitLabel(.done)
             }
             if !databases.isEmpty {
-                Picker("Escolher", selection: $config.database) {
-                    if !databases.contains(config.database) {
-                        Text(config.database.isEmpty ? "—" : config.database).tag(config.database)
+                Button {
+                    pickingDatabase = true
+                } label: {
+                    HStack {
+                        Text("Escolher da lista").foregroundStyle(.primary)
+                        Spacer()
+                        Text("\(databases.count) bancos").foregroundStyle(.secondary)
+                        Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
                     }
-                    ForEach(databases, id: \.self) { Text($0).tag($0) }
                 }
-                .pickerStyle(.navigationLink)
             }
             Button {
                 Task { await loadDatabases() }
@@ -460,7 +479,9 @@ struct ConnectionFormView: View {
                 testResult = .failure("Nenhum banco listado.")
             } else {
                 testResult = .success("\(list.count) bancos encontrados")
-                if config.database.isEmpty, let first = list.first { config.database = first }
+                // Não preenche nada sozinho: banco vazio é uma escolha válida (abre o
+                // servidor e escolhe depois). A lista abre para quem quiser fixar um.
+                if !pickingDatabase { pickingDatabase = true }
                 Haptics.success()
             }
         } catch {

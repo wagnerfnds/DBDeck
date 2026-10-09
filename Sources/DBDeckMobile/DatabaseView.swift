@@ -15,6 +15,8 @@ struct DatabaseView: View {
     @State private var showNewDatabase = false
     @State private var newDatabaseName = ""
     @State private var kindFilter: KindFilter = .all
+    @State private var showDatabasePicker = false
+    @State private var loadingDatabases = false
 
     private enum KindFilter: String, CaseIterable, Identifiable {
         case all = "Todas"
@@ -32,11 +34,38 @@ struct DatabaseView: View {
         session.activeDatabase ?? (config?.database.isEmpty == false ? config?.database : nil)
     }
 
+    /// Conexão de servidor sem banco fixo e nenhum escolhido ainda. Listar tabelas aqui
+    /// é erro garantido no MySQL ("No database selected") — a tela pede o banco antes.
+    private var needsDatabaseChoice: Bool {
+        guard let config, config.engine != .sqlite else { return false }
+        return activeDatabase == nil
+    }
+
+    private var databaseChooser: some View {
+        DatabaseList(
+            databases: session.databases,
+            current: activeDatabase,
+            defaultDatabase: config?.database.isEmpty == false ? config?.database : nil,
+            recents: RecentDatabases.list(for: connectionID),
+            engine: config?.engine ?? .postgres,
+            isLoading: loadingDatabases,
+            prompt: "Esta conexão não fixa um banco. Escolha um para ver as tabelas.",
+            onPick: { name in Task { await switchDatabase(to: name) } },
+            onRefresh: { await loadDatabases() },
+            onCreate: {
+                newDatabaseName = ""
+                showNewDatabase = true
+            }
+        )
+    }
+
     var body: some View {
         @Bindable var session = session
         Group {
             if driver == nil {
                 connectingState
+            } else if needsDatabaseChoice {
+                databaseChooser
             } else {
                 tableList
             }
@@ -48,6 +77,26 @@ struct DatabaseView: View {
         .errorAlert($errorMessage)
         .toast($notice)
         .shareSheet($sharedFile)
+        .sheet(isPresented: $showDatabasePicker) {
+            NavigationStack {
+                DatabasePickerSheet(
+                    connectionID: connectionID,
+                    databases: session.databases,
+                    current: activeDatabase,
+                    defaultDatabase: config?.database.isEmpty == false ? config?.database : nil,
+                    engine: config?.engine ?? .postgres,
+                    isLoading: loadingDatabases,
+                    onPick: { name in Task { await switchDatabase(to: name) } },
+                    onRefresh: { await loadDatabases() },
+                    onCreate: {
+                        newDatabaseName = ""
+                        showNewDatabase = true
+                    }
+                )
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        }
         .alert("Novo banco de dados", isPresented: $showNewDatabase) {
             TextField("nome", text: $newDatabaseName)
                 .autocorrectionDisabled()
@@ -210,18 +259,26 @@ struct DatabaseView: View {
         }
         ToolbarItem(placement: .primaryAction) {
             Menu {
-                Button {
-                    Task { await reloadTables() }
-                } label: { Label("Recarregar", systemImage: "arrow.clockwise") }
+                if needsDatabaseChoice {
+                    Button {
+                        Task { await loadDatabases() }
+                    } label: { Label("Atualizar bancos", systemImage: "arrow.clockwise") }
+                } else {
+                    Button {
+                        Task { await reloadTables() }
+                    } label: { Label("Recarregar", systemImage: "arrow.clockwise") }
+                }
                 if let config, config.engine != .sqlite {
                     Button {
                         newDatabaseName = ""
                         showNewDatabase = true
                     } label: { Label("Novo banco de dados", systemImage: "plus.square.on.square") }
                 }
-                Button {
-                    Task { await dumpDatabase() }
-                } label: { Label("Dump do banco (.sql)", systemImage: "externaldrive.badge.icloud") }
+                if !needsDatabaseChoice {
+                    Button {
+                        Task { await dumpDatabase() }
+                    } label: { Label("Dump do banco (.sql)", systemImage: "externaldrive.badge.icloud") }
+                }
                 Divider()
                 Button(role: .destructive) {
                     state.disconnect(connectionID)
@@ -235,32 +292,16 @@ struct DatabaseView: View {
     }
 
     private func databaseMenu(_ config: ConnectionConfig) -> some View {
-        Menu {
-            if session.databases.isEmpty {
-                Text("Nenhum banco listado")
-            }
-            ForEach(session.databases, id: \.self) { database in
-                Button {
-                    Task { await switchDatabase(to: database) }
-                } label: {
-                    if database == activeDatabase {
-                        Label(database, systemImage: "checkmark")
-                    } else {
-                        Text(database)
-                    }
-                }
-            }
-            Divider()
-            Button {
-                Task { await loadDatabases() }
-            } label: { Label("Atualizar lista", systemImage: "arrow.clockwise") }
+        Button {
+            Haptics.tap()
+            showDatabasePicker = true
         } label: {
             HStack(spacing: 4) {
                 VStack(spacing: 0) {
-                    Text(config.name).font(.headline).lineLimit(1)
+                    Text(config.name).font(.headline).foregroundStyle(.primary).lineLimit(1)
                     Text(activeDatabase ?? "escolher banco")
                         .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(activeDatabase == nil ? Color.accentColor : .secondary)
                         .lineLimit(1)
                 }
                 Image(systemName: "chevron.down.circle.fill")
@@ -269,8 +310,8 @@ struct DatabaseView: View {
             }
             .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
         .accessibilityLabel("Banco ativo: \(activeDatabase ?? "nenhum"). Toque para trocar.")
-        .task { if !session.databasesLoaded { await loadDatabases() } }
     }
 
     // MARK: - Ações
@@ -286,11 +327,16 @@ struct DatabaseView: View {
                 return
             }
         }
-        if !session.tablesLoaded { await reloadTables() }
+        if needsDatabaseChoice {
+            if !session.databasesLoaded || session.databases.isEmpty { await loadDatabases() }
+        } else {
+            if !session.databasesLoaded { Task { await loadDatabases() } }
+            if !session.tablesLoaded { await reloadTables() }
+        }
     }
 
     private func reloadTables() async {
-        guard let driver else { return }
+        guard let driver, !needsDatabaseChoice else { return }
         isLoading = true
         defer { isLoading = false }
         do {
@@ -303,6 +349,8 @@ struct DatabaseView: View {
 
     private func loadDatabases() async {
         guard let driver else { return }
+        loadingDatabases = true
+        defer { loadingDatabases = false }
         if let list = try? await driver.databases() {
             state.setDatabases(list, for: connectionID)
         }
@@ -315,6 +363,7 @@ struct DatabaseView: View {
         defer { isLoading = false }
         navigator.resetTables(for: connectionID)
         if await state.switchDatabase(connectionID, to: database) {
+            RecentDatabases.record(database, for: connectionID)
             await reloadTables()
         } else if case .failed(let message) = state.connectionStatus[connectionID] {
             errorMessage = message
